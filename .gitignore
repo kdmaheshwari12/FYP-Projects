@@ -65,11 +65,9 @@ security.log
 Thumbs.db
 
 # ========================
-# ML / Data Files (sensitive or large)
+# ML / Data Files (Committed for small datasets)
 # ========================
-*.faiss
-*.csv
-vector_index.faiss
+# Removed ignore for .faiss and .csv to allow RAG system to work on Railway
 
 # ========================
 # Testing

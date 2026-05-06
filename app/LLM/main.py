@@ -84,7 +84,7 @@ def validate_safe_path(fp, allowed="."):
 
 INDEX_PATH = validate_safe_path(INDEX_PATH, BASE_DIR)
 if not os.path.exists(INDEX_PATH):
-    print("ERROR: FAISS index not found. Run: python encoding_rebuild.py"); sys.exit(1)
+    print("ERROR: FAISS index not found. Run: python app/LLM/encoding.py"); sys.exit(1)
 
 # ── FAISS Integrity ───────────────────────────────────────────────────────────
 if FAISS_CHECKSUM:

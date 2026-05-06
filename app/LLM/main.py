@@ -44,7 +44,7 @@ logger.addHandler(_h)
 load_dotenv()
 API_KEY             = os.getenv("GROQ_API_KEY", "").strip()
 BASE_DIR = os.path.dirname(__file__)
-INDEX_PATH = os.path.join(BASE_DIR, os.getenv("INDEX_PATH", "vector_index.faiss").strip())
+INDEX_PATH = os.path.join(BASE_DIR, os.getenv("INDEX_PATH", "vector_index.faiss.backup").strip())
 FAISS_CHECKSUM      = os.getenv("FAISS_CHECKSUM", "").strip() or None
 MAX_QUERIES_PER_MIN = int(os.getenv("MAX_QUERIES_PER_MINUTE", "10"))
 

@@ -27,3 +27,4 @@ Pillow
 Jinja2
 email-validator
 pytz
+faiss-cpu

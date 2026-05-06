@@ -25,3 +25,4 @@ sentence-transformers
 huggingface_hub
 Pillow
 Jinja2
+email-validator

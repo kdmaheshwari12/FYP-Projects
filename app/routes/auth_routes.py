@@ -99,8 +99,8 @@ async def get_current_user_obj(
 # --------------------------------------------------------------------------
 # POST /auth/signup — register a new user
 # --------------------------------------------------------------------------
-@router.post("/signup")
-async def signup(user_data: UserSignup):
+@router.post("/register")
+async def register(user_data: UserSignup):
     """
     Register a new user with email, name, and password.
 
@@ -126,8 +126,9 @@ async def signup(user_data: UserSignup):
     hashed_password = get_password_hash(user_data.password)
     user = await create_user(
         email=user_data.email,
-        name=user_data.name,
+        name=user_data.full_name,
         hashed_password=hashed_password,
+        role=user_data.role
     )
 
     # Issue JWT pair
@@ -141,6 +142,7 @@ async def signup(user_data: UserSignup):
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
+        "role": user.get("role", "user"),
         "user": {
             "id": user.get("id"),
             "email": user.get("email"),
@@ -209,6 +211,7 @@ async def login(credentials: UserLogin):
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
+        "role": user_role,
         "user": {
             "id": user.get("id"),
             "email": user.get("email"),

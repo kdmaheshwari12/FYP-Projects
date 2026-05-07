@@ -24,14 +24,14 @@ async def get_user_by_id(user_id: str):
     return serialize_doc(user)
 
 
-async def create_user(email: str, name: str, hashed_password: str):
-    """Create a new user with email and hashed password."""
+async def create_user(email: str, name: str, hashed_password: str, role: str = settings.DEFAULT_USER_ROLE):
+    """Create a new user with email, name, hashed password, and role."""
     now = datetime.now(timezone.utc)
     new_user = {
         "email": email,
         "name": name,
         "hashed_password": hashed_password,
-        "role": settings.DEFAULT_USER_ROLE,
+        "role": role,
         "is_active": True,
         "last_login": now,
         "created_at": now,

@@ -12,10 +12,11 @@ from datetime import datetime
 # Auth Request Schemas
 # --------------------------------------------------------------------------
 class UserSignup(BaseModel):
-    """Body for POST /auth/signup."""
+    """Body for POST /auth/register."""
     email: EmailStr
-    name: str
+    full_name: str
     password: str
+    role: str = "traveler"
 
 
 class UserLogin(BaseModel):

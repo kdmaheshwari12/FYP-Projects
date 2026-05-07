@@ -20,7 +20,7 @@ import logging
 
 # Configure root logger
 logging.basicConfig(
-    level=logging.DEBUG,  # DEBUG in dev — change to INFO in production
+    level=logging.INFO,  # Changed to INFO to prevent pymongo DEBUG spam
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)

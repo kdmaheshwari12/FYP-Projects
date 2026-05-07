@@ -107,7 +107,7 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    email = payload["email"]
+    email = payload["sub"]
     user_msg = message.get("message", "").strip()
     msg_lower = user_msg.lower()
 
@@ -336,7 +336,7 @@ async def get_dashboard(token: str = Depends(oauth2_scheme)):
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    email = payload["email"]
+    email = payload["sub"]
 
     # Fetch My Trips
     my_trips = await itineraries_collection.find({"user_email": email}).to_list(None)
@@ -363,7 +363,7 @@ async def save_preferences(preferences: dict, token: str = Depends(oauth2_scheme
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    email = payload["email"]
+    email = payload["sub"]
 
     # Remove previous preferences for this user
     await preferences_collection.delete_many({"user_email": email})
@@ -388,7 +388,7 @@ async def generate_itinerary(preferences: dict, token: str = Depends(oauth2_sche
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    email = payload["email"]
+    email = payload["sub"]
 
     # ------------------------
     # Extract Preferences

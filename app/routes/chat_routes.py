@@ -5,7 +5,7 @@ from bson import ObjectId
 
 from app.routes.auth_routes import get_current_user_obj
 from app.services.cometchat_services import ensure_cometchat_user
-from app.db.mongodb import trips_collection, users_collection, brokers_collection
+from app.db.mongodb import trips_collection, users_collection
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 

@@ -1,27 +1,28 @@
 # app/models/user_model.py
+"""
+MongoDB user document model.
 
-from pydantic import BaseModel, EmailStr
+Fields mirror what is stored in the `users` collection.
+"""
+
+from datetime import datetime
 from typing import Optional
+from pydantic import BaseModel, Field, EmailStr
 
-# Shared base model for users
-class UserBase(BaseModel):
+
+class User(BaseModel):
+    id: Optional[str] = Field(alias="_id")
+    name: str
     email: EmailStr
-    full_name: Optional[str] = None
-    role: str = "traveler"  # traveler or broker
-
-# Used when a new user registers
-class UserCreate(UserBase):
-    password: str
-
-# Used for login requests
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
-
-# Model used for reading user data (response)
-class UserOut(UserBase):
-    id: str
-
-# Optional — internal DB representation if needed
-class UserInDB(UserBase):
     hashed_password: str
+    role: str = "user"  # user | admin | broker
+    is_active: bool = True
+    last_login: Optional[datetime] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    class Config:
+        populate_by_name = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }

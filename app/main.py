@@ -42,19 +42,32 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # ── Startup ──
+    """
+    App Lifespan: Handles startup and shutdown logic.
+    """
     logger.info("🚀 Starting Pakvel Backend...")
-
-    # 1. Connect to MongoDB
-    await connect_to_mongo()
-
-    logger.info("✅ All startup tasks completed.")
-    yield
-
-    # ── Shutdown ──
-    logger.info("🛑 Shutting down Pakvel Backend...")
-    await close_mongo_connection()
-    logger.info("👋 Shutdown complete.")
+    try:
+        # 1. Connect to MongoDB
+        await connect_to_mongo()
+        logger.info("✅ MongoDB connected successfully.")
+        
+        # 2. Add other startup tasks here (e.g. index checks)
+        
+        logger.info("⚡ Application startup complete.")
+        yield
+    except Exception as e:
+        logger.error(f"💥 Critical error during startup: {e}")
+        # Allow the app to crash if DB connection fails
+        raise e
+    finally:
+        # Shutdown phase
+        logger.info("🛑 Shutting down Pakvel Backend...")
+        try:
+            await close_mongo_connection()
+            logger.info("✅ Database connections closed.")
+        except Exception as e:
+            logger.error(f"⚠️ Error during cleanup: {e}")
+        logger.info("👋 Shutdown complete.")
 
 
 # --------------------------------------------------------------------------

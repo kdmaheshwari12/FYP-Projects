@@ -14,3 +14,8 @@ httpx
 groq
 apscheduler
 requests
+langchain-huggingface
+langchain-groq
+langchain-community
+faiss-cpu
+sentence-transformers

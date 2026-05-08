@@ -165,12 +165,7 @@ async def submit_review(
             status_code=500,
             content={"success": False, "message": "Failed to submit review. Please try again."}
         )
-    except Exception as e:
-        logger.error(f"💥 Error submitting review: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": "Failed to submit review. Please try again."}
-        )
+
 
 #fetch all reviews
 @router.get("/itinerary/{itinerary_id}")

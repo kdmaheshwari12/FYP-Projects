@@ -419,6 +419,23 @@ User request:
 SUGGESTED_CACHE = {"data": [], "timestamp": datetime.datetime.min}
 CACHE_TTL = datetime.timedelta(minutes=10)
 
+# Helper to safely serialize any MongoDB document
+def _serialize_doc(doc: dict) -> dict:
+    """Convert all ObjectId fields in a document to strings."""
+    for key, value in doc.items():
+        if isinstance(value, ObjectId):
+            doc[key] = str(value)
+        elif isinstance(value, list):
+            doc[key] = [
+                _serialize_doc(item) if isinstance(item, dict) else
+                str(item) if isinstance(item, ObjectId) else item
+                for item in value
+            ]
+        elif isinstance(value, dict):
+            doc[key] = _serialize_doc(value)
+    return doc
+
+
 # 1️⃣ Traveler Dashboard
 @router.get("/dashboard")
 async def get_dashboard(token: str = Depends(oauth2_scheme)):
@@ -430,27 +447,38 @@ async def get_dashboard(token: str = Depends(oauth2_scheme)):
 
     email = payload["sub"]
 
-    # Fetch My Trips
-    my_trips = await itineraries_collection.find({"user_email": email}).to_list(None)
-    for trip in my_trips:
-        trip["_id"] = str(trip["_id"])
+    try:
+        # Fetch My Trips
+        my_trips = await itineraries_collection.find({"user_email": email}).to_list(None)
+        for trip in my_trips:
+            _serialize_doc(trip)
 
-    # Fetch/Cache suggested itineraries
-    now = datetime.utcnow()
-    if not SUGGESTED_CACHE["data"] or (now - SUGGESTED_CACHE["timestamp"]) > CACHE_TTL:
-        suggested = await itineraries_collection.aggregate([{"$sample": {"size": 3}}]).to_list(None)
-        for s in suggested:
-            s["_id"] = str(s["_id"])
-        SUGGESTED_CACHE = {"data": suggested, "timestamp": now}
-        logger.info("🆕 Dashboard suggested trips cache REFRESHED")
-    else:
-        logger.debug("⚡ Dashboard suggested trips cache HIT")
+        # Fetch/Cache suggested itineraries
+        now = datetime.datetime.utcnow()
+        if not SUGGESTED_CACHE["data"] or (now - SUGGESTED_CACHE["timestamp"]) > CACHE_TTL:
+            try:
+                suggested = await itineraries_collection.aggregate([{"$sample": {"size": 3}}]).to_list(None)
+                for s in suggested:
+                    _serialize_doc(s)
+                SUGGESTED_CACHE = {"data": suggested, "timestamp": now}
+                logger.info("🆕 Dashboard suggested trips cache REFRESHED")
+            except Exception as agg_err:
+                logger.warning(f"⚠️ $sample aggregation failed (empty collection?): {agg_err}")
+                SUGGESTED_CACHE = {"data": [], "timestamp": now}
+        else:
+            logger.debug("⚡ Dashboard suggested trips cache HIT")
 
-    return {
-        "message": "Traveler dashboard loaded successfully",
-        "my_trips": my_trips,
-        "suggested_trips": SUGGESTED_CACHE["data"],
-    }
+        return {
+            "message": "Traveler dashboard loaded successfully",
+            "my_trips": my_trips,
+            "suggested_trips": SUGGESTED_CACHE["data"],
+        }
+    except Exception as e:
+        logger.error(f"💥 Dashboard error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Dashboard loading failed: {str(e)}"}
+        )
 
 
 # 2️⃣ Save Preferences
@@ -524,7 +552,7 @@ async def generate_itinerary(preferences: dict, token: str = Depends(oauth2_sche
     # ------------------------
     existing = await itineraries_collection.find_one({"unique_hash": unique_hash})
     if existing:
-        existing["_id"] = str(existing["_id"])
+        _serialize_doc(existing)
         return {
             "message": "Itinerary already existed — returning saved version.",
             "duplicate": True,
@@ -532,19 +560,26 @@ async def generate_itinerary(preferences: dict, token: str = Depends(oauth2_sche
         }
 
     # ------------------------
-    # Call RAG LLM
+    # Call RAG LLM (in thread pool to avoid blocking async event loop)
     # ------------------------
+    import asyncio
     try:
-        llm_output = generate_itinerary_llm(
+        llm_output = await asyncio.to_thread(
+            generate_itinerary_llm,
             destination=destination,
             days=duration,
             budget=budget,
             interests=interests
         )
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"LLM generation failed: {str(e)}")
+        logger.error(f"💥 LLM generation failed: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": f"AI itinerary generation failed. Please try again. Error: {str(e)}"
+            }
+        )
 
     # ------------------------
     # Prepare Itinerary Object
@@ -564,8 +599,16 @@ async def generate_itinerary(preferences: dict, token: str = Depends(oauth2_sche
     # ------------------------
     # Save to MongoDB
     # ------------------------
-    result = await itineraries_collection.insert_one(itinerary)
-    itinerary["_id"] = str(result.inserted_id)
+    try:
+        result = await itineraries_collection.insert_one(itinerary)
+        itinerary["_id"] = str(result.inserted_id)
+        _serialize_doc(itinerary)
+    except Exception as e:
+        logger.error(f"💥 Failed to save itinerary: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Failed to save itinerary"}
+        )
 
     # ------------------------
     # Return Response

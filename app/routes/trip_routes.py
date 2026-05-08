@@ -26,142 +26,124 @@ async def create_trip(
 ):
     """
     Create or reuse a trip with validation.
-    
-    Used for:
-    - AI itinerary → broker discussion
-    - Broker pre-designed itinerary → discussion
-    
-    Body:
-    {
-      "itinerary_id": "...",
-      "trip_type": "ai" or "broker",
-      "broker_id": "...",  (optional)
-      "destination": "Hunza",
-      "budget": 50000
-    }
     """
-    errors = []
-    
-    # 🔎 LOG AUTH CONTEXT
-    logger.info("CREATE_TRIP called")
-    logger.info(f"Authenticated user ID: {current_user.get('_id')}")
-    logger.info(f"User email: {current_user.get('email')}")
-
-    # ========== ITINERARY ID VALIDATION ==========
-    itinerary_id = data.get("itinerary_id")
-    if not itinerary_id:
-        raise HTTPException(
-            status_code=400,
-            detail="itinerary_id is required"
-        )
+    request_id = f"TRIP-{id(data)}"
+    logger.info(f"[{request_id}] 🆕 CREATE_TRIP attempt | User: {current_user.get('email')}")
     
     try:
-        itinerary_obj_id = ObjectId(itinerary_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid itinerary_id format")
-
-    # ========== TRIP TYPE VALIDATION ==========
-    try:
-        trip_type = validate_choice(
-            data.get("trip_type"),
-            ["ai", "broker"],
-            "trip_type"
-        )
-    except ValidationError as e:
-        errors.append(e)
-
-    # ========== DESTINATION VALIDATION (optional) ==========
-    destination = None
-    if data.get("destination"):
-        try:
-            destination = validate_string(
-                data.get("destination"),
-                "destination",
-                allow_empty=False,
-                min_length=2,
-                max_length=100
+        errors = []
+        
+        # ========== ITINERARY ID VALIDATION ==========
+        itinerary_id = data.get("itinerary_id")
+        if not itinerary_id:
+            logger.warning(f"[{request_id}] ❌ Missing itinerary_id")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "itinerary_id is required"}
             )
+        
+        try:
+            itinerary_obj_id = ObjectId(itinerary_id)
+        except Exception:
+            logger.warning(f"[{request_id}] ❌ Invalid itinerary_id format: {itinerary_id}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Invalid itinerary_id format"}
+            )
+
+        # ========== TRIP TYPE VALIDATION ==========
+        try:
+            trip_type = validate_choice(
+                data.get("trip_type"),
+                ["ai", "broker", "ai_self", "ai_broker"],
+                "trip_type"
+            )
+            logger.debug(f"[{request_id}] Trip type validated: {trip_type}")
         except ValidationError as e:
             errors.append(e)
 
-    # ========== BUDGET VALIDATION (optional) ==========
-    budget = None
-    if data.get("budget"):
-        try:
-            budget = validate_integer(
-                data.get("budget"),
-                "budget",
-                min_value=1,
-                max_value=10000000
+        # ========== DESTINATION VALIDATION ==========
+        destination = data.get("destination")
+        if destination:
+            try:
+                destination = validate_string(destination, "destination", allow_empty=False, min_length=2, max_length=100)
+            except ValidationError as e:
+                errors.append(e)
+
+        # ========== BUDGET VALIDATION ==========
+        budget = data.get("budget")
+        if budget:
+            try:
+                budget = validate_integer(budget, "budget", min_value=1)
+            except ValidationError as e:
+                errors.append(e)
+
+        # ========== BROKER ID VALIDATION ==========
+        broker_id = data.get("broker_id")
+        broker_obj_id = None
+        if broker_id:
+            try:
+                broker_obj_id = ObjectId(broker_id)
+            except Exception:
+                errors.append(ValidationError("broker_id", "Invalid broker_id format"))
+
+        # Return validation errors
+        if errors:
+            logger.warning(f"[{request_id}] ❌ Validation failed: {len(errors)} errors")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "success": False,
+                    "message": "Validation failed",
+                    "errors": [str(e) for e in errors]
+                }
             )
-        except ValidationError as e:
-            errors.append(e)
 
-    # ========== BROKER ID VALIDATION (optional) ==========
-    broker_obj_id = None
-    if data.get("broker_id"):
-        try:
-            broker_obj_id = ObjectId(data.get("broker_id"))
-        except Exception as e:
-            errors.append(ValidationError("broker_id", "Invalid broker_id format"))
+        # ========== CHECK EXISTING TRIP ==========
+        existing_trip = await trips_collection.find_one({
+            "user_id": ObjectId(current_user["_id"]),
+            "itinerary_source_id": itinerary_obj_id,
+            "trip_type": trip_type,
+        })
 
-    # ========== RETURN VALIDATION ERRORS ==========
-    if errors:
-        logger.warning(f"Trip creation validation failed: {len(errors)} error(s)")
-        raise HTTPException(
-            status_code=422,
-            detail=ValidationErrorResponse.from_errors(errors).dict()
-        )
+        if existing_trip:
+            logger.info(f"[{request_id}] 🔁 Trip reused: {existing_trip['_id']}")
+            return {
+                "success": True,
+                "message": "Trip details retrieved",
+                "trip_id": str(existing_trip["_id"]),
+                "reused": True
+            }
 
-    # ============================================================
-    # 🔁 STEP 1: CHECK EXISTING TRIP (CRITICAL)
-    # ============================================================
-    existing_trip = await trips_collection.find_one({
-        "user_id": ObjectId(current_user["_id"]),
-        "itinerary_source_id": itinerary_obj_id,
-        "trip_type": trip_type,
-    })
-
-    if existing_trip:
-        logger.info(
-            f"Trip reused | trip_id={existing_trip['_id']} | user={current_user['_id']}"
-        )
-        return {
-            "trip_id": str(existing_trip["_id"]),
-            "reused": True
-        }
-
-    # ============================================================
-    # ➕ STEP 2: CREATE NEW TRIP
-    # ============================================================
-    try:
+        # ========== CREATE NEW TRIP ==========
         trip_doc = {
             "user_id": ObjectId(current_user["_id"]),
-            "trip_type": trip_type,                      # ai | broker
-            "itinerary_source_id": itinerary_obj_id,     # ai itinerary OR broker itinerary
-            "broker_id": broker_obj_id,                  # nullable
+            "trip_type": trip_type,
+            "itinerary_source_id": itinerary_obj_id,
+            "broker_id": broker_obj_id,
             "status": "chatting" if broker_obj_id else "draft",
             "destination": destination,
             "budget": budget,
-            "chat_id": None,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow()
         }
 
         result = await trips_collection.insert_one(trip_doc)
-
-        logger.info(
-            f"New trip created | trip_id={result.inserted_id} | user={current_user['_id']}"
-        )
+        logger.info(f"[{request_id}] ✅ New trip created: {result.inserted_id}")
 
         return {
+            "success": True,
+            "message": "Trip created successfully",
             "trip_id": str(result.inserted_id),
-            "reused": False,
-            "message": "Trip created successfully"
+            "reused": False
         }
+
     except Exception as e:
-        logger.error(f"Error creating trip: {e}")
-        raise HTTPException(status_code=500, detail="Failed to create trip")
+        logger.error(f"[{request_id}] 💥 Error creating trip: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Internal server error while creating trip"}
+        )
 
 #------------------------------------------------------------
 #Route for showing detailed itinerary in broker modal whether it's AI or BROKER

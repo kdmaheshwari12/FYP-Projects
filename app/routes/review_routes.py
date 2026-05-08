@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 from bson import ObjectId
 from datetime import datetime
 
@@ -140,25 +141,24 @@ async def submit_review(
         
         await broker_reviews_collection.insert_one(review_doc)
         
-        logger.info(f"Review submitted successfully by user: {current_user['_id']}")
+        logger.info(f"✅ Review submitted successfully by user: {current_user['_id']}")
         
         return {
-            "status": "success",
+            "success": True,
             "message": "Review submitted successfully"
         }
         
     except DuplicateKeyError:
-        # Unique index (userId + itineraryId) violation
-        logger.warning(f"Duplicate review attempt: user={current_user['_id']}, itinerary={itinerary_id}")
-        raise HTTPException(
+        logger.warning(f"⚠️ Duplicate review attempt: user={current_user['_id']}, itinerary={itinerary_id}")
+        return JSONResponse(
             status_code=400,
-            detail="You have already reviewed this itinerary"
+            content={"success": False, "message": "You have already reviewed this itinerary"}
         )
     except Exception as e:
-        logger.error(f"Error submitting review: {e}")
-        raise HTTPException(
+        logger.error(f"💥 Error submitting review: {str(e)}", exc_info=True)
+        return JSONResponse(
             status_code=500,
-            detail="Failed to submit review. Please try again."
+            content={"success": False, "message": "Failed to submit review. Please try again."}
         )
 
 #fetch all reviews

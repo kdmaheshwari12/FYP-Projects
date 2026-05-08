@@ -177,11 +177,21 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
                 text=bot_reply
             )
 
-        return {"reply": bot_reply}
+        logger.info(f"[{conversationId}] ✅ AI reply generated successfully")
+        return {
+            "success": True,
+            "reply": bot_reply
+        }
 
     except Exception as e:
-        logger.error(f"Error in chatbot: {e}")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        logger.error(f"[{conversationId}] 💥 Error in chatbot: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": "AI service encountered an error. Please try again."
+            }
+        )
 
     # 1️⃣ FETCH USER'S STORED ITINERARIES
     itineraries = await itineraries_collection.find({"user_email": email}).to_list(None)
@@ -223,6 +233,7 @@ RULES:
         )
 
         bot_reply = response.choices[0].message.content
+        logger.info(f"[{conversationId}] ✅ AI General Reply generated")
 
         # Log bot reply
         await log_message(
@@ -234,7 +245,10 @@ RULES:
             text=bot_reply
         )
 
-        return {"reply": bot_reply}
+        return {
+            "success": True,
+            "reply": bot_reply
+        }
 
     # --------------------------
     # MODE 2 — ITINERARY MODIFICATION

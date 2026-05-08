@@ -29,6 +29,13 @@ from app.core.security import (
     verify_password,
     get_password_hash,
 )
+from app.core.validation import (
+    validate_email,
+    validate_password,
+    validate_name,
+    ValidationError,
+    ValidationErrorResponse,
+)
 from app.schemas.user_schema import (
     UserSignup,
     UserLogin,
@@ -107,49 +114,94 @@ async def register(user_data: UserSignup):
     Body:
         {
             "email": "user@example.com",
-            "name": "John Doe",
-            "password": "securepassword123"
+            "full_name": "John Doe",
+            "password": "SecurePass123!",
+            "role": "traveler"
         }
+    
+    Returns:
+        Access and refresh tokens with user data
+    
+    Raises:
+        400: Validation errors (invalid email, weak password, etc.)
+        400: Email already registered
     """
     logger.info(f"📝 Signup attempt for email: {user_data.email}")
-
-    # Check if user already exists
-    existing_user = await get_user_by_email(user_data.email)
+    
+    errors = []
+    
+    # ========== VALIDATION ==========
+    try:
+        validated_email = validate_email(user_data.email, "email")
+    except ValidationError as e:
+        errors.append(e)
+        validated_email = None
+    
+    try:
+        validated_name = validate_name(user_data.full_name, "full_name", allow_spaces=True)
+    except ValidationError as e:
+        errors.append(e)
+        validated_name = None
+    
+    try:
+        validated_password = validate_password(user_data.password, "password")
+    except ValidationError as e:
+        errors.append(e)
+        validated_password = None
+    
+    # Return validation errors
+    if errors:
+        error_response = ValidationErrorResponse.from_errors(errors)
+        logger.warning(f"Signup validation failed: {len(errors)} error(s)")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=error_response.dict()
+        )
+    
+    # ========== CHECK DUPLICATE EMAIL ==========
+    existing_user = await get_user_by_email(validated_email)
     if existing_user:
-        logger.warning(f"⚠️ Signup failed — email already registered: {user_data.email}")
+        logger.warning(f"⚠️ Signup failed — email already registered: {validated_email}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email already registered",
         )
-
-    # Hash the password and create user
-    hashed_password = get_password_hash(user_data.password)
-    user = await create_user(
-        email=user_data.email,
-        name=user_data.full_name,
-        hashed_password=hashed_password,
-        role=user_data.role
-    )
-
-    # Issue JWT pair
-    access_token = create_access_token(subject=user["email"], role=user.get("role", "user"))
-    refresh_token = create_refresh_token(subject=user["email"])
-
-    logger.info(f"✅ User registered successfully: {user_data.email}")
-
-    return {
-        "message": "User registered successfully",
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "role": user.get("role", "user"),
-        "user": {
-            "id": user.get("id"),
-            "email": user.get("email"),
-            "name": user.get("name"),
+    
+    # ========== CREATE USER ==========
+    try:
+        hashed_password = get_password_hash(validated_password)
+        user = await create_user(
+            email=validated_email,
+            name=validated_name,
+            hashed_password=hashed_password,
+            role=user_data.role
+        )
+        
+        # Issue JWT pair
+        access_token = create_access_token(subject=user["email"], role=user.get("role", "user"))
+        refresh_token = create_refresh_token(subject=user["email"])
+        
+        logger.info(f"✅ User registered successfully: {validated_email}")
+        
+        return {
+            "message": "User registered successfully",
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
             "role": user.get("role", "user"),
-        },
-    }
+            "user": {
+                "id": user.get("id"),
+                "email": user.get("email"),
+                "name": user.get("name"),
+                "role": user.get("role", "user"),
+            },
+        }
+    except Exception as e:
+        logger.error(f"Error creating user: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user. Please try again."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -163,17 +215,36 @@ async def login(credentials: UserLogin):
     Body:
         {
             "email": "user@example.com",
-            "password": "securepassword123"
+            "password": "SecurePass123!"
         }
 
     Returns:
         JWT access + refresh token pair and user data
+    
+    Raises:
+        422: Validation errors (invalid email format)
+        401: Invalid email or password
+        403: Account is deactivated
     """
     logger.info(f"🔐 Login attempt for email: {credentials.email}")
-
-    user = await get_user_by_email(credentials.email)
+    
+    # ========== VALIDATION ==========
+    errors = []
+    
+    try:
+        validated_email = validate_email(credentials.email, "email")
+    except ValidationError as e:
+        errors.append(e)
+        logger.warning(f"Login validation failed for email: {e.message}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=ValidationErrorResponse.from_error(e).dict()
+        )
+    
+    # ========== AUTHENTICATE ==========
+    user = await get_user_by_email(validated_email)
     if not user:
-        logger.warning(f"⚠️ Login failed — user not found: {credentials.email}")
+        logger.warning(f"⚠️ Login failed — user not found: {validated_email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -182,7 +253,7 @@ async def login(credentials: UserLogin):
 
     # Verify password
     if not verify_password(credentials.password, user.get("hashed_password", "")):
-        logger.warning(f"⚠️ Login failed — invalid password for: {credentials.email}")
+        logger.warning(f"⚠️ Login failed — invalid password for: {validated_email}")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password",
@@ -191,20 +262,21 @@ async def login(credentials: UserLogin):
 
     # Check if user is active
     if not user.get("is_active", True):
+        logger.warning(f"⚠️ Login failed — account deactivated: {validated_email}")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account is deactivated. Contact support.",
         )
 
     # Update last login timestamp
-    await update_last_login(user["email"])
+    await update_last_login(validated_email)
 
     # Issue JWT pair
     user_role = user.get("role", "user")
-    access_token = create_access_token(subject=user["email"], role=user_role)
-    refresh_token = create_refresh_token(subject=user["email"])
+    access_token = create_access_token(subject=validated_email, role=user_role)
+    refresh_token = create_refresh_token(subject=validated_email)
 
-    logger.info(f"✅ Login successful for {credentials.email}")
+    logger.info(f"✅ Login successful for {validated_email}")
 
     return {
         "message": "Login successful",

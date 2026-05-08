@@ -17,6 +17,10 @@ import os
 import uuid
 from dotenv import load_dotenv
 from app.LLM.main import generate_itinerary_llm
+from app.core.validation import validate_string, ValidationError
+import logging
+
+logger = logging.getLogger(__name__)
 load_dotenv()
 
 router = APIRouter(prefix="/traveler", tags=["Traveler"])
@@ -98,56 +102,80 @@ async def log_message(
 
 
 # -------------------------------------------
-# 🔵 CHATBOT ROUTE (UPDATED)
+# 🔵 CHATBOT ROUTE (UPDATED WITH VALIDATION)
 # -------------------------------------------
 @router.post("/chat")
 async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
-
+    """
+    Chat endpoint with message validation and sanitization.
+    
+    Body:
+    {
+      "message": "I want to visit Hunza Valley"
+    }
+    """
     payload = decode_access_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     email = payload["sub"]
-    user_msg = message.get("message", "").strip()
+    
+    # ========== MESSAGE VALIDATION & SANITIZATION ==========
+    try:
+        user_msg = validate_string(
+            message.get("message"),
+            "message",
+            allow_empty=False,
+            min_length=1,
+            max_length=5000
+        )
+    except ValidationError as e:
+        logger.warning(f"Chat message validation failed: {e.message}")
+        raise HTTPException(
+            status_code=422,
+            detail={"error": e.message, "field": "message", "code": e.code}
+        )
+    
     msg_lower = user_msg.lower()
 
     # Fetch user to get userID
-    user = await users_collection.find_one({"email": email})
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    try:
+        user = await users_collection.find_one({"email": email})
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
 
-    user_id = user["_id"]
-    conversationId = f"conv-{user_id}"   # persistent conversation ID
+        user_id = user["_id"]
+        conversationId = f"conv-{user_id}"   # persistent conversation ID
 
-    # -------------------------------------------
-    # 🔵 Log USER MESSAGE
-    # -------------------------------------------
-    await log_message(
-        conversationId=conversationId,
-        senderId=user_id,
-        receiverId=None,
-        senderType="traveler",
-        receiverType="ai",
-        text=user_msg
-    )
-
-    # 0️⃣ GREETINGS
-    greetings = ["hi", "hello", "hey", "salam", "assalamualaikum",
-                 "good morning", "good evening"]
-
-    if msg_lower in greetings or any(msg_lower.startswith(g) for g in greetings):
-
-        bot_reply = "Hello! 👋 How can I help you with your travel planning today?"
-
-        # Log bot reply
+        # -------------------------------------------
+        # 🔵 Log USER MESSAGE (sanitized)
+        # -------------------------------------------
         await log_message(
             conversationId=conversationId,
-            senderId=None,
-            receiverId=user_id,
-            senderType="ai",
-            receiverType="traveler",
-            text=bot_reply
+            senderId=user_id,
+            receiverId=None,
+            senderType="traveler",
+            receiverType="ai",
+            text=user_msg
         )
+
+        # 0️⃣ GREETINGS
+        greetings = ["hi", "hello", "hey", "salam", "assalamualaikum",
+                     "good morning", "good evening"]
+
+        if msg_lower in greetings or any(msg_lower.startswith(g) for g in greetings):
+
+            bot_reply = "Hello! 👋 How can I help you with your travel planning today?"
+
+            # Log bot reply
+            await log_message(
+                conversationId=conversationId,
+                senderId=None,
+                receiverId=user_id,
+                senderType="ai",
+                receiverType="traveler",
+                text=bot_reply
+            )
 
         return {"reply": bot_reply}
 

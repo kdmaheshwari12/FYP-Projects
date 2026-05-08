@@ -4,6 +4,10 @@ import os
 from datetime import datetime
 from bson import ObjectId
 from app.db.mongodb import weather_collection, itineraries_collection
+from app.core.validation import validate_string, ValidationError
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/weather", tags=["Weather"])
 
@@ -19,12 +23,43 @@ import httpx
 
 @router.get("/live")
 async def get_live_weather(city: str):
-    city = city.strip().title()
+    """
+    Get live weather for a city with validation.
+    
+    Parameters:
+        city: City name (validated)
+    
+    Returns:
+        Weather data from OpenWeather API
+        
+    Raises:
+        422: Invalid city format
+        400: Weather service error
+    """
+    try:
+        # ========== CITY VALIDATION ==========
+        validated_city = validate_string(
+            city,
+            "city",
+            allow_empty=False,
+            min_length=2,
+            max_length=100
+        )
+        # Normalize to title case for API
+        validated_city = validated_city.title()
+        
+    except ValidationError as e:
+        logger.warning(f"Weather city validation failed: {e.message}")
+        raise HTTPException(
+            status_code=422,
+            detail={"error": e.message, "field": "city"}
+        )
+    
     try:
         # 1️⃣ Check cache (last 10 minutes)
         cached = await weather_collection.find_one(
             {
-                "city": city,
+                "city": validated_city,
                 "weather": {"$exists": True},
                 "timestamp": {
                     "$gte": datetime.utcnow() - timedelta(minutes=10)
@@ -35,6 +70,7 @@ async def get_live_weather(city: str):
 
         if cached:
             ts = cached.get("timestamp")
+            logger.debug(f"Weather cache hit for city: {validated_city}")
 
             return {
                 "status": "success",
@@ -48,24 +84,27 @@ async def get_live_weather(city: str):
         # 2️⃣ Call OpenWeather only if cache miss
         url = (
             "https://api.openweathermap.org/data/2.5/weather"
-            f"?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+            f"?q={validated_city}&appid={OPENWEATHER_API_KEY}&units=metric"
         )
 
         async with httpx.AsyncClient(timeout=10) as client:
             res = await client.get(url)
 
         if res.status_code != 200:
-            raise HTTPException(status_code=400, detail=res.text)
+            logger.error(f"OpenWeather API error: {res.status_code} - {res.text}")
+            raise HTTPException(status_code=400, detail="City not found or API error")
 
         data = res.json()
 
         # 3️⃣ Store snapshot
         now = datetime.utcnow()
         await weather_collection.insert_one({
-            "city": city,
+            "city": validated_city,
             "weather": data,
             "timestamp": now
         })
+
+        logger.info(f"Weather data fetched for city: {validated_city}")
 
         return {
             "status": "success",
@@ -77,7 +116,7 @@ async def get_live_weather(city: str):
     except HTTPException:
         raise
     except Exception as e:
-        print("❌ LIVE WEATHER ERROR:", e)
+        logger.error(f"❌ LIVE WEATHER ERROR: {e}")
         raise HTTPException(
             status_code=500,
             detail="Internal weather service error"

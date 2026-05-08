@@ -4,6 +4,13 @@ from datetime import datetime, timedelta
 import logging
 from app.db.mongodb import trips_collection, itineraries_collection, broker_itineraries_collection
 from app.routes.auth_routes import get_current_user_obj
+from app.core.validation import (
+    validate_choice,
+    validate_string,
+    validate_integer,
+    ValidationError,
+    ValidationErrorResponse,
+)
 
 router = APIRouter(prefix="/trips", tags=["Trips"])
 
@@ -18,42 +25,93 @@ async def create_trip(
     current_user: dict = Depends(get_current_user_obj)
 ):
     """
-    Create or reuse a trip.
+    Create or reuse a trip with validation.
+    
     Used for:
     - AI itinerary → broker discussion
     - Broker pre-designed itinerary → discussion
+    
+    Body:
+    {
+      "itinerary_id": "...",
+      "trip_type": "ai" or "broker",
+      "broker_id": "...",  (optional)
+      "destination": "Hunza",
+      "budget": 50000
+    }
     """
-
+    errors = []
+    
     # 🔎 LOG AUTH CONTEXT
     logger.info("CREATE_TRIP called")
     logger.info(f"Authenticated user ID: {current_user.get('_id')}")
     logger.info(f"User email: {current_user.get('email')}")
 
+    # ========== ITINERARY ID VALIDATION ==========
     itinerary_id = data.get("itinerary_id")
-    trip_type = data.get("trip_type")  # "ai" | "broker"
-    broker_id = data.get("broker_id")  # optional
-    destination = data.get("destination")
-    budget = data.get("budget")
-
-    if not itinerary_id or not trip_type:
+    if not itinerary_id:
         raise HTTPException(
             status_code=400,
-            detail="itinerary_id and trip_type are required"
+            detail="itinerary_id is required"
         )
-
-    # ✅ Validate itinerary id
+    
     try:
         itinerary_obj_id = ObjectId(itinerary_id)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid itinerary_id")
+        raise HTTPException(status_code=400, detail="Invalid itinerary_id format")
 
-    # ✅ Validate broker id (optional)
-    broker_obj_id = None
-    if broker_id:
+    # ========== TRIP TYPE VALIDATION ==========
+    try:
+        trip_type = validate_choice(
+            data.get("trip_type"),
+            ["ai", "broker"],
+            "trip_type"
+        )
+    except ValidationError as e:
+        errors.append(e)
+
+    # ========== DESTINATION VALIDATION (optional) ==========
+    destination = None
+    if data.get("destination"):
         try:
-            broker_obj_id = ObjectId(broker_id)
-        except Exception:
-            raise HTTPException(status_code=400, detail="Invalid broker_id")
+            destination = validate_string(
+                data.get("destination"),
+                "destination",
+                allow_empty=False,
+                min_length=2,
+                max_length=100
+            )
+        except ValidationError as e:
+            errors.append(e)
+
+    # ========== BUDGET VALIDATION (optional) ==========
+    budget = None
+    if data.get("budget"):
+        try:
+            budget = validate_integer(
+                data.get("budget"),
+                "budget",
+                min_value=1,
+                max_value=10000000
+            )
+        except ValidationError as e:
+            errors.append(e)
+
+    # ========== BROKER ID VALIDATION (optional) ==========
+    broker_obj_id = None
+    if data.get("broker_id"):
+        try:
+            broker_obj_id = ObjectId(data.get("broker_id"))
+        except Exception as e:
+            errors.append(ValidationError("broker_id", "Invalid broker_id format"))
+
+    # ========== RETURN VALIDATION ERRORS ==========
+    if errors:
+        logger.warning(f"Trip creation validation failed: {len(errors)} error(s)")
+        raise HTTPException(
+            status_code=422,
+            detail=ValidationErrorResponse.from_errors(errors).dict()
+        )
 
     # ============================================================
     # 🔁 STEP 1: CHECK EXISTING TRIP (CRITICAL)
@@ -62,7 +120,6 @@ async def create_trip(
         "user_id": ObjectId(current_user["_id"]),
         "itinerary_source_id": itinerary_obj_id,
         "trip_type": trip_type,
-        
     })
 
     if existing_trip:
@@ -77,27 +134,28 @@ async def create_trip(
     # ============================================================
     # ➕ STEP 2: CREATE NEW TRIP
     # ============================================================
-    trip_doc = {
-        "user_id": ObjectId(current_user["_id"]),
-        "trip_type": trip_type,                      # ai | broker
-        "itinerary_source_id": itinerary_obj_id,     # ai itinerary OR broker itinerary
-        "broker_id": broker_obj_id,                  # nullable
-        "status": "chatting" if broker_obj_id else "draft",
-        "destination": destination,
-        "budget": budget,
-        "chat_id": None,
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow()
-    }
+    try:
+        trip_doc = {
+            "user_id": ObjectId(current_user["_id"]),
+            "trip_type": trip_type,                      # ai | broker
+            "itinerary_source_id": itinerary_obj_id,     # ai itinerary OR broker itinerary
+            "broker_id": broker_obj_id,                  # nullable
+            "status": "chatting" if broker_obj_id else "draft",
+            "destination": destination,
+            "budget": budget,
+            "chat_id": None,
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow()
+        }
 
-    result = await trips_collection.insert_one(trip_doc)
+        result = await trips_collection.insert_one(trip_doc)
 
-    logger.info(
-        f"New trip created | trip_id={result.inserted_id} | user={current_user['_id']}"
-    )
+        logger.info(
+            f"New trip created | trip_id={result.inserted_id} | user={current_user['_id']}"
+        )
 
-    return {
-        "trip_id": str(result.inserted_id),
+        return {
+            "trip_id": str(result.inserted_id),
         "reused": False,
         "message": "Trip created successfully"
     }

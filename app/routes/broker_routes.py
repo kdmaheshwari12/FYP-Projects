@@ -10,6 +10,20 @@ from app.db.mongodb import (
     broker_reviews_collection,
 )
 from app.routes.auth_routes import get_current_user_obj
+from app.core.validation import (
+    validate_email,
+    validate_pakistan_phone,
+    validate_cnic,
+    validate_name,
+    validate_string,
+    validate_integer,
+    validate_choice,
+    ValidationError,
+    ValidationErrorResponse,
+)
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/broker", tags=["Broker"])
 
@@ -18,106 +32,356 @@ from typing import List
 @router.post("/verify")
 async def broker_verification(data: dict):
     """
+    Broker verification endpoint with comprehensive validation.
+    
+    Required Fields:
     {
-      "email": "...",
-      "org_name": "...",
-      "phone": "...",
-      "cnic": "...",
-      "license_number": "...",
-      "tagline": "...",
+      "email": "broker@example.com",
+      "org_name": "Travel Company Name",
+      "phone": "0300-1234567",
+      "cnic": "35201-1234567-1",
+      "license_number": "LIC123456",
+      "tagline": "Best travel experiences",
       "years_of_experience": 5,
-      "specialized_areas": ["Adventure and Nature Tourism", "Luxury Travel"]
+      "specialized_areas": ["Adventure and Nature Tourism"]
     }
+    
+    Returns:
+        Confirmation message
+        
+    Raises:
+        422: Validation errors
+        404: User not found
+        403: User is not a broker
     """
-
-    email = data.get("email")
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
-    email= email.strip().lower()
-    org_name = data.get("org_name")
-    tagline = data.get("tagline")
-    years_of_experience = data.get("years_of_experience")
-    specialized_areas = data.get("specialized_areas")
-
-    if not org_name:
-        raise HTTPException(status_code=400, detail="Organization name is required")
-
-    if not tagline:
-        raise HTTPException(status_code=400, detail="Tagline is required")
-
-    if not years_of_experience:
-        raise HTTPException(status_code=400, detail="Years of experience is required")
-
-    if not specialized_areas or not isinstance(specialized_areas, list):
-        raise HTTPException(status_code=400, detail="Specialized areas are required")
-
-    print("Incoming email", email)
-    user = await users_collection.find_one({"email": email})
-    print("User found:", user)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    if user["role"] != "broker":
-        raise HTTPException(status_code=403, detail="User is not a broker")
-
-    await users_collection.update_one(
-        {"email": email},
-        {"$set": {
-            "org_name": org_name,
-            "tagline": tagline,
-            "years_of_experience": years_of_experience,
-            "specialized_areas": specialized_areas,
-            "verification_details": {
-                "phone": data.get("phone"),
-                "cnic": data.get("cnic"),
-                "license_number": data.get("license_number"),
-            },
-            "can_login": True,
-            "is_verified": False
-        }}
-    )
-
-    return {"message": "Verification submitted successfully"}
+    errors = []
+    
+    # ========== EMAIL VALIDATION ==========
+    try:
+        validated_email = validate_email(data.get("email"), "email")
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== ORGANIZATION NAME VALIDATION ==========
+    try:
+        validated_org_name = validate_string(
+            data.get("org_name"), 
+            "org_name",
+            allow_empty=False,
+            min_length=2,
+            max_length=100
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== PHONE VALIDATION ==========
+    try:
+        validated_phone = validate_pakistan_phone(data.get("phone"), "phone")
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== CNIC VALIDATION ==========
+    try:
+        validated_cnic = validate_cnic(data.get("cnic"), "cnic")
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== LICENSE NUMBER VALIDATION ==========
+    try:
+        validated_license = validate_string(
+            data.get("license_number"),
+            "license_number",
+            allow_empty=False,
+            min_length=5,
+            max_length=50
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== TAGLINE VALIDATION ==========
+    try:
+        validated_tagline = validate_string(
+            data.get("tagline"),
+            "tagline",
+            allow_empty=False,
+            min_length=10,
+            max_length=200
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== YEARS OF EXPERIENCE VALIDATION ==========
+    try:
+        validated_experience = validate_integer(
+            data.get("years_of_experience"),
+            "years_of_experience",
+            min_value=0,
+            max_value=70
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== SPECIALIZED AREAS VALIDATION ==========
+    try:
+        specialized_areas = data.get("specialized_areas")
+        if not specialized_areas or not isinstance(specialized_areas, list):
+            raise ValidationError(
+                "specialized_areas",
+                "Specialized areas must be a non-empty list",
+                code="INVALID_SPECIALIZED_AREAS"
+            )
+        if len(specialized_areas) == 0:
+            raise ValidationError(
+                "specialized_areas",
+                "At least one specialized area is required",
+                code="EMPTY_SPECIALIZED_AREAS"
+            )
+        # Validate each area is a non-empty string
+        validated_areas = []
+        for i, area in enumerate(specialized_areas):
+            if not isinstance(area, str) or not area.strip():
+                raise ValidationError(
+                    "specialized_areas",
+                    f"Area {i+1} must be a non-empty string",
+                    code="INVALID_AREA_FORMAT"
+                )
+            validated_areas.append(area.strip())
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== RETURN VALIDATION ERRORS ==========
+    if errors:
+        logger.warning(f"Broker verification validation failed: {len(errors)} error(s)")
+        raise HTTPException(
+            status_code=422,
+            detail=ValidationErrorResponse.from_errors(errors).dict()
+        )
+    
+    # ========== USER EXISTENCE & ROLE CHECK ==========
+    try:
+        logger.info(f"Looking up broker by email: {validated_email}")
+        user = await users_collection.find_one({"email": validated_email})
+        
+        if not user:
+            logger.warning(f"Broker not found: {validated_email}")
+            raise HTTPException(
+                status_code=404,
+                detail="User not found"
+            )
+        
+        if user.get("role") != "broker":
+            logger.warning(f"User is not a broker: {validated_email}")
+            raise HTTPException(
+                status_code=403,
+                detail="User is not a broker"
+            )
+        
+        # ========== UPDATE USER WITH VERIFIED DATA ==========
+        await users_collection.update_one(
+            {"email": validated_email},
+            {"$set": {
+                "org_name": validated_org_name,
+                "tagline": validated_tagline,
+                "years_of_experience": validated_experience,
+                "specialized_areas": validated_areas,
+                "verification_details": {
+                    "phone": validated_phone,
+                    "cnic": validated_cnic,
+                    "license_number": validated_license,
+                },
+                "can_login": True,
+                "is_verified": False,
+                "updated_at": datetime.utcnow()
+            }}
+        )
+        
+        logger.info(f"Broker verification submitted successfully: {validated_email}")
+        
+        return {
+            "status": "success",
+            "message": "Verification submitted successfully",
+            "email": validated_email
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating broker verification: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to submit verification. Please try again."
+        )
 
 # ------------------------------------------------------
 # 1️⃣ CREATE ITINERARY
 # ------------------------------------------------------
 @router.post("/itineraries")
 async def create_itinerary(data: dict, current_user: dict = Depends(get_current_user_obj)):
-
+    """
+    Create a new itinerary with comprehensive validation.
+    
+    Required Fields:
+    {
+      "title": "Hunza Valley Adventure",
+      "departure_location": "Islamabad",
+      "arrival_location": "Hunza",
+      "duration_days": 7,
+      "price_per_person": 15000,
+      "description": "Amazing trip description",
+      "phone": "0300-1234567",
+      "email": "broker@example.com",
+      "trip_locations": ["Islamabad", "Hunza"],
+      "days": [...],
+      "cover_image": "url"
+    }
+    """
+    errors = []
+    
+    # ========== ROLE CHECK ==========
     if current_user["role"] != "broker":
         raise HTTPException(status_code=403, detail="Only brokers can create itineraries")
-
-    itinerary = {
-        "brokerId": ObjectId(current_user["_id"]),
-        "title": data["title"],
-        "departure_location": data["departure_location"],
-        "arrival_location": data["arrival_location"],
-        "trip_locations": data.get("trip_locations", []),
-
-        "duration_days": data["duration_days"],
-        "price_per_person": data["price_per_person"],
-        "description": data["description"],
-        "days": data.get("days", []),
-        "cover_image": data.get("cover_image", ""),
-
-        "contact_info": {
-            "phone": data.get("phone", ""),
-            "whatsapp": data.get("whatsapp", ""),
-            "email": data.get("email", "")
-        },
-
-        "created_at": datetime.utcnow(),
-        "updated_at": datetime.utcnow(),
-        "is_published": False,
-    }
-
-    result = await broker_itineraries_collection.insert_one(itinerary)
-
-    return {
-        "message": "Itinerary created successfully",
-        "id": str(result.inserted_id)
-    }
+    
+    # ========== TITLE VALIDATION ==========
+    try:
+        validated_title = validate_string(
+            data.get("title"),
+            "title",
+            allow_empty=False,
+            min_length=5,
+            max_length=200
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== LOCATION VALIDATION ==========
+    try:
+        validated_departure = validate_string(
+            data.get("departure_location"),
+            "departure_location",
+            allow_empty=False,
+            min_length=2,
+            max_length=100
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    try:
+        validated_arrival = validate_string(
+            data.get("arrival_location"),
+            "arrival_location",
+            allow_empty=False,
+            min_length=2,
+            max_length=100
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== DESCRIPTION VALIDATION ==========
+    try:
+        validated_description = validate_string(
+            data.get("description"),
+            "description",
+            allow_empty=False,
+            min_length=10,
+            max_length=5000
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== DURATION VALIDATION ==========
+    try:
+        validated_duration = validate_integer(
+            data.get("duration_days"),
+            "duration_days",
+            min_value=1,
+            max_value=365
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== PRICE VALIDATION ==========
+    try:
+        validated_price = validate_integer(
+            data.get("price_per_person"),
+            "price_per_person",
+            min_value=1,
+            max_value=10000000  # 10 million PKR max
+        )
+    except ValidationError as e:
+        errors.append(e)
+    
+    # ========== CONTACT INFO VALIDATION ==========
+    # Phone (optional but if provided, must be valid)
+    validated_phone = None
+    if data.get("phone"):
+        try:
+            validated_phone = validate_pakistan_phone(data.get("phone"), "phone")
+        except ValidationError as e:
+            errors.append(e)
+    
+    # Email (optional but if provided, must be valid)
+    validated_email = None
+    if data.get("email"):
+        try:
+            validated_email = validate_email(data.get("email"), "contact_email")
+        except ValidationError as e:
+            errors.append(e)
+    
+    # WhatsApp (optional but if provided, must be valid phone)
+    validated_whatsapp = None
+    if data.get("whatsapp"):
+        try:
+            validated_whatsapp = validate_pakistan_phone(data.get("whatsapp"), "whatsapp")
+        except ValidationError as e:
+            errors.append(e)
+    
+    # ========== RETURN VALIDATION ERRORS ==========
+    if errors:
+        logger.warning(f"Itinerary creation validation failed: {len(errors)} error(s)")
+        raise HTTPException(
+            status_code=422,
+            detail=ValidationErrorResponse.from_errors(errors).dict()
+        )
+    
+    try:
+        # ========== CREATE ITINERARY ==========
+        itinerary = {
+            "brokerId": ObjectId(current_user["_id"]),
+            "title": validated_title,
+            "departure_location": validated_departure,
+            "arrival_location": validated_arrival,
+            "trip_locations": data.get("trip_locations", []),
+            "duration_days": validated_duration,
+            "price_per_person": validated_price,
+            "description": validated_description,
+            "days": data.get("days", []),
+            "cover_image": data.get("cover_image", ""),
+            "contact_info": {
+                "phone": validated_phone or "",
+                "whatsapp": validated_whatsapp or "",
+                "email": validated_email or ""
+            },
+            "created_at": datetime.utcnow(),
+            "updated_at": datetime.utcnow(),
+            "is_published": False,
+        }
+        
+        result = await broker_itineraries_collection.insert_one(itinerary)
+        
+        logger.info(f"Itinerary created successfully: {result.inserted_id}")
+        
+        return {
+            "status": "success",
+            "message": "Itinerary created successfully",
+            "id": str(result.inserted_id)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error creating itinerary: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create itinerary. Please try again."
+        )
 
 # ------------------------------------------------------
 # 2️⃣ UPDATE ITINERARY

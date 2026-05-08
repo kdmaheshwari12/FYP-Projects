@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.database.mongodb import connect_to_mongo, close_mongo_connection
 from app.core.config import settings
+from app.middleware.input_sanitization import InputSanitizationMiddleware, RequestLoggingMiddleware
 from app.routes import auth_routes
 import uvicorn
 import logging
@@ -55,6 +56,21 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# --------------------------------------------------------------------------
+# Security & Request Processing Middleware
+#
+# Note: Middleware is executed in REVERSE order of addition.
+# Last added = executed first.
+# --------------------------------------------------------------------------
+
+# 1. Request Logging (executed first)
+app.add_middleware(RequestLoggingMiddleware)
+
+# 2. Input Sanitization (sanitize JSON payloads)
+app.add_middleware(InputSanitizationMiddleware)
+
+logger.info("✅ Security middleware added: InputSanitization, RequestLogging")
 
 # --------------------------------------------------------------------------
 # CORS — CRITICAL for frontend ↔ backend communication

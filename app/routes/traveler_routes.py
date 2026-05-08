@@ -416,8 +416,8 @@ User request:
 
 
 # Simple global cache for suggested itineraries
-SUGGESTED_CACHE = {"data": [], "timestamp": datetime.min}
-CACHE_TTL = timedelta(minutes=10)
+SUGGESTED_CACHE = {"data": [], "timestamp": datetime.datetime.min}
+CACHE_TTL = datetime.timedelta(minutes=10)
 
 # 1️⃣ Traveler Dashboard
 @router.get("/dashboard")

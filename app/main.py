@@ -9,8 +9,10 @@ Shutdown:
     1. Close MongoDB connection
 """
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from fastapi.exceptions import RequestValidationError
 from contextlib import asynccontextmanager
 from app.database.mongodb import connect_to_mongo, close_mongo_connection
 from app.core.config import settings
@@ -64,6 +66,48 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# --------------------------------------------------------------------------
+# Custom Exception Handlers
+# --------------------------------------------------------------------------
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """
+    Catch Pydantic validation errors (422) and return them as uniform 400 JSON.
+    """
+    error_details = exc.errors()
+    # Create a user-friendly message from the first error
+    msg = "Invalid input data"
+    if error_details:
+        first_error = error_details[0]
+        field = ".".join(str(loc) for loc in first_error.get("loc", []))
+        msg = f"Error in field '{field}': {first_error.get('msg')}"
+
+    logger.warning(f"🛡️ Global Validation Error: {msg}")
+    
+    return JSONResponse(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        content={
+            "success": False,
+            "message": msg,
+            "errors": error_details
+        }
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """
+    Catch-all for any unhandled server errors.
+    """
+    logger.error(f"💥 UNHANDLED SERVER ERROR: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "success": False,
+            "message": "A critical server error occurred. Please try again later."
+        }
+    )
 
 # --------------------------------------------------------------------------
 # Security & Request Processing Middleware

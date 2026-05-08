@@ -16,7 +16,8 @@ Endpoints:
     GET  /auth/admin/users  — Admin-only: list all users
 """
 
-from fastapi import APIRouter, HTTPException, status, Depends
+from fastapi import APIRouter, HTTPException, status, Depends, Response
+from fastapi.responses import JSONResponse
 from app.services.user_service import (
     get_user_by_email,
     create_user,
@@ -111,69 +112,65 @@ async def get_current_user_obj(
 async def register(user_data: UserSignup):
     """
     Register a new user with email, name, and password.
-
-    Body:
-        {
-            "email": "user@example.com",
-            "full_name": "John Doe",
-            "password": "SecurePass123!",
-            "role": "traveler"
-        }
-    
-    Returns:
-        Access and refresh tokens with user data
-    
-    Raises:
-        400: Validation errors (invalid email, weak password, etc.)
-        400: Email already registered
     """
-    logger.info(f"📝 Signup attempt for email: {user_data.email}")
-    
-    errors = []
-    
-    # ========== VALIDATION ==========
-    try:
-        validated_email = validate_email(user_data.email, "email")
-    except ValidationError as e:
-        errors.append(e)
-        validated_email = None
+    request_id = f"REG-{id(user_data)}"
+    logger.info(f"[{request_id}] 📝 Signup attempt | Email: {user_data.email} | Role: {user_data.role}")
     
     try:
-        validated_name = validate_name(user_data.full_name, "full_name", allow_spaces=True)
-    except ValidationError as e:
-        errors.append(e)
-        validated_name = None
-    
-    try:
-        validated_password = validate_password(user_data.password, "password")
-    except ValidationError as e:
-        errors.append(e)
-        validated_password = None
-    
-    # Return validation errors
-    if errors:
-        error_response = ValidationErrorResponse.from_errors(errors)
-        # Log specific errors for debugging
-        for err in errors:
-            logger.warning(f"❌ Signup validation error on '{err.field}': {err.message}")
+        errors = []
+        
+        # ========== VALIDATION ==========
+        try:
+            validated_email = validate_email(user_data.email, "email")
+            logger.debug(f"[{request_id}] Email validation PASSED")
+        except ValidationError as e:
+            errors.append(e)
+            validated_email = None
+        
+        try:
+            validated_name = validate_name(user_data.full_name, "full_name", allow_spaces=True)
+            logger.debug(f"[{request_id}] Name validation PASSED")
+        except ValidationError as e:
+            errors.append(e)
+            validated_name = None
+        
+        try:
+            validated_password = validate_password(user_data.password, "password")
+            logger.debug(f"[{request_id}] Password validation PASSED")
+        except ValidationError as e:
+            errors.append(e)
+            validated_password = None
+        
+        # Return validation errors
+        if errors:
+            error_response = ValidationErrorResponse.from_errors(errors)
+            for err in errors:
+                logger.warning(f"[{request_id}] ❌ Validation error on '{err.field}': {err.message}")
             
-        logger.warning(f"Signup validation failed: {len(errors)} error(s)")
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=error_response.dict()
-        )
-    
-    # ========== CHECK DUPLICATE EMAIL ==========
-    existing_user = await get_user_by_email(validated_email)
-    if existing_user:
-        logger.warning(f"⚠️ Signup failed — email already registered: {validated_email}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Email already registered",
-        )
-    
-    # ========== CREATE USER ==========
-    try:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "message": "Validation failed",
+                    "errors": error_response.dict()["errors"]
+                }
+            )
+        
+        # ========== CHECK DUPLICATE EMAIL ==========
+        logger.debug(f"[{request_id}] Checking database for existing user...")
+        existing_user = await get_user_by_email(validated_email)
+        if existing_user:
+            logger.warning(f"[{request_id}] ⚠️ Signup failed — email already registered: {validated_email}")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "message": "Email already registered"
+                }
+            )
+        
+        # ========== CREATE USER ==========
+        logger.info(f"[{request_id}] Hashing password and saving to database...")
         hashed_password = get_password_hash(validated_password)
         user = await create_user(
             email=validated_email,
@@ -183,17 +180,19 @@ async def register(user_data: UserSignup):
         )
         
         # Issue JWT pair
+        logger.debug(f"[{request_id}] Generating JWT tokens...")
         access_token = create_access_token(subject=user["email"], role=user.get("role", "user"))
         refresh_token = create_refresh_token(subject=user["email"])
         
-        logger.info(f"✅ User registered successfully: {validated_email}")
+        logger.info(f"[{request_id}] ✅ User registered successfully: {validated_email}")
         
         return {
+            "success": True,
             "message": "User registered successfully",
+            "token": access_token,
             "access_token": access_token,
             "refresh_token": refresh_token,
             "token_type": "bearer",
-            "role": user.get("role", "user"),
             "user": {
                 "id": user.get("id"),
                 "email": user.get("email"),
@@ -201,11 +200,15 @@ async def register(user_data: UserSignup):
                 "role": user.get("role", "user"),
             },
         }
+
     except Exception as e:
-        logger.error(f"Error creating user: {e}")
-        raise HTTPException(
+        logger.error(f"[{request_id}] 💥 CRITICAL ERROR in register: {str(e)}", exc_info=True)
+        return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create user. Please try again."
+            content={
+                "success": False,
+                "message": f"Server error during registration: {str(e)}"
+            }
         )
 
 
@@ -216,85 +219,95 @@ async def register(user_data: UserSignup):
 async def login(credentials: UserLogin):
     """
     Login with email and password.
-
-    Body:
-        {
-            "email": "user@example.com",
-            "password": "SecurePass123!"
-        }
-
-    Returns:
-        JWT access + refresh token pair and user data
-    
-    Raises:
-        422: Validation errors (invalid email format)
-        401: Invalid email or password
-        403: Account is deactivated
     """
-    logger.info(f"🔐 Login attempt for email: {credentials.email}")
-    
-    # ========== VALIDATION ==========
-    errors = []
+    request_id = f"LOG-{id(credentials)}"
+    logger.info(f"[{request_id}] 🔐 Login attempt | Email: {credentials.email}")
     
     try:
-        validated_email = validate_email(credentials.email, "email")
-    except ValidationError as e:
-        logger.warning(f"❌ Login validation error on 'email': {e.message}")
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=ValidationErrorResponse.from_error(e).dict()
+        # ========== VALIDATION ==========
+        try:
+            validated_email = validate_email(credentials.email, "email")
+        except ValidationError as e:
+            logger.warning(f"[{request_id}] ❌ Login email validation error: {e.message}")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "message": e.message
+                }
+            )
+        
+        # ========== AUTHENTICATE ==========
+        logger.debug(f"[{request_id}] Fetching user from database...")
+        user = await get_user_by_email(validated_email)
+        if not user:
+            logger.warning(f"[{request_id}] ⚠️ Login failed — user not found: {validated_email}")
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={
+                    "success": False,
+                    "message": "Invalid email or password"
+                }
+            )
+
+        # Verify password
+        logger.debug(f"[{request_id}] Verifying password...")
+        if not verify_password(credentials.password, user.get("hashed_password", "")):
+            logger.warning(f"[{request_id}] ⚠️ Login failed — invalid password for: {validated_email}")
+            return JSONResponse(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                content={
+                    "success": False,
+                    "message": "Invalid email or password"
+                }
+            )
+
+        # Check if user is active
+        if not user.get("is_active", True):
+            logger.warning(f"[{request_id}] ⚠️ Login failed — account deactivated: {validated_email}")
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={
+                    "success": False,
+                    "message": "Account is deactivated"
+                }
+            )
+
+        # Update last login timestamp
+        await update_last_login(validated_email)
+
+        # Issue JWT pair
+        logger.debug(f"[{request_id}] Generating JWT tokens...")
+        user_role = user.get("role", "user")
+        access_token = create_access_token(subject=validated_email, role=user_role)
+        refresh_token = create_refresh_token(subject=validated_email)
+
+        logger.info(f"[{request_id}] ✅ Login successful for {validated_email}")
+
+        return {
+            "success": True,
+            "message": "Login successful",
+            "token": access_token,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "user": {
+                "id": user.get("id"),
+                "email": user.get("email"),
+                "name": user.get("name"),
+                "role": user_role,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"[{request_id}] 💥 CRITICAL ERROR in login: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "success": False,
+                "message": f"Server error during login: {str(e)}"
+            }
         )
-    
-    # ========== AUTHENTICATE ==========
-    user = await get_user_by_email(validated_email)
-    if not user:
-        logger.warning(f"⚠️ Login failed — user not found: {validated_email}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Verify password
-    if not verify_password(credentials.password, user.get("hashed_password", "")):
-        logger.warning(f"⚠️ Login failed — invalid password for: {validated_email}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid email or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Check if user is active
-    if not user.get("is_active", True):
-        logger.warning(f"⚠️ Login failed — account deactivated: {validated_email}")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Account is deactivated. Contact support.",
-        )
-
-    # Update last login timestamp
-    await update_last_login(validated_email)
-
-    # Issue JWT pair
-    user_role = user.get("role", "user")
-    access_token = create_access_token(subject=validated_email, role=user_role)
-    refresh_token = create_refresh_token(subject=validated_email)
-
-    logger.info(f"✅ Login successful for {validated_email}")
-
-    return {
-        "message": "Login successful",
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "role": user_role,
-        "user": {
-            "id": user.get("id"),
-            "email": user.get("email"),
-            "name": user.get("name"),
-            "role": user_role,
-        },
-    }
 
 
 # --------------------------------------------------------------------------

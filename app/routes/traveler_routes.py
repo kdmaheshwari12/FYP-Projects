@@ -179,6 +179,10 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
 
         return {"reply": bot_reply}
 
+    except Exception as e:
+        logger.error(f"Error in chatbot: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
     # 1️⃣ FETCH USER'S STORED ITINERARIES
     itineraries = await itineraries_collection.find({"user_email": email}).to_list(None)
     known_cities = [it["destination"].lower() for it in itineraries]

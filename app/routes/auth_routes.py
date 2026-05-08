@@ -104,8 +104,9 @@ async def get_current_user_obj(
 
 
 # --------------------------------------------------------------------------
-# POST /auth/signup — register a new user
+# POST /auth/signup (alias for /register) — register a new user
 # --------------------------------------------------------------------------
+@router.post("/signup")
 @router.post("/register")
 async def register(user_data: UserSignup):
     """
@@ -152,6 +153,10 @@ async def register(user_data: UserSignup):
     # Return validation errors
     if errors:
         error_response = ValidationErrorResponse.from_errors(errors)
+        # Log specific errors for debugging
+        for err in errors:
+            logger.warning(f"❌ Signup validation error on '{err.field}': {err.message}")
+            
         logger.warning(f"Signup validation failed: {len(errors)} error(s)")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -234,8 +239,7 @@ async def login(credentials: UserLogin):
     try:
         validated_email = validate_email(credentials.email, "email")
     except ValidationError as e:
-        errors.append(e)
-        logger.warning(f"Login validation failed for email: {e.message}")
+        logger.warning(f"❌ Login validation error on 'email': {e.message}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=ValidationErrorResponse.from_error(e).dict()

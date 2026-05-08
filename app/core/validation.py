@@ -132,6 +132,10 @@ def sanitize_string(
     return value
 
 
+# Alias for backward compatibility and routes usage
+validate_string = sanitize_string
+
+
 def sanitize_dict(data: Dict[str, Any], allowed_fields: Optional[List[str]] = None) -> Dict[str, Any]:
     """
     Sanitize a dictionary by removing null values and trimming strings.

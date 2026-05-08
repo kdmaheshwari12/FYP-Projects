@@ -15,7 +15,15 @@ from contextlib import asynccontextmanager
 from app.database.mongodb import connect_to_mongo, close_mongo_connection
 from app.core.config import settings
 from app.middleware.input_sanitization import InputSanitizationMiddleware, RequestLoggingMiddleware
-from app.routes import auth_routes
+from app.routes import (
+    auth_routes,
+    broker_routes,
+    chat_routes,
+    review_routes,
+    traveler_routes,
+    trip_routes,
+    weather_routes,
+)
 import uvicorn
 import logging
 
@@ -105,6 +113,12 @@ else:
 # Routers
 # --------------------------------------------------------------------------
 app.include_router(auth_routes.router)
+app.include_router(broker_routes.router)
+app.include_router(chat_routes.router)
+app.include_router(review_routes.router)
+app.include_router(traveler_routes.router)
+app.include_router(trip_routes.router)
+app.include_router(weather_routes.router)
 
 
 # --------------------------------------------------------------------------

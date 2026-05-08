@@ -156,9 +156,13 @@ async def create_trip(
 
         return {
             "trip_id": str(result.inserted_id),
-        "reused": False,
-        "message": "Trip created successfully"
-    }
+            "reused": False,
+            "message": "Trip created successfully"
+        }
+    except Exception as e:
+        logger.error(f"Error creating trip: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create trip")
+
 #------------------------------------------------------------
 #Route for showing detailed itinerary in broker modal whether it's AI or BROKER
 #------------------------------------------------------------

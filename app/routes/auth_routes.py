@@ -364,13 +364,10 @@ async def get_me(current_user: dict = Depends(get_current_active_user)):
         Authorization: Bearer <BACKEND_JWT_TOKEN>
     """
     return {
-        "message": "User retrieved successfully",
-        "user": {
-            "id": current_user.get("id"),
-            "email": current_user.get("email"),
-            "name": current_user.get("name"),
-            "role": current_user.get("role", "user"),
-        },
+        "id": str(current_user.get("_id")),
+        "email": current_user.get("email"),
+        "full_name": current_user.get("name"),
+        "role": current_user.get("role", "traveler"),
     }
 
 

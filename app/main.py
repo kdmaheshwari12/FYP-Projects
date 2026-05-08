@@ -9,10 +9,11 @@ Shutdown:
     1. Close MongoDB connection
 """
 
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import http_exception_handler
 from contextlib import asynccontextmanager
 from app.database.mongodb import connect_to_mongo, close_mongo_connection
 from app.core.config import settings
@@ -113,6 +114,10 @@ async def global_exception_handler(request: Request, exc: Exception):
     """
     Catch-all for any unhandled server errors.
     """
+    # If it's already an HTTPException, let FastAPI handle it normally
+    if isinstance(exc, HTTPException):
+        return await http_exception_handler(request, exc)
+
     logger.error(f"💥 UNHANDLED SERVER ERROR: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -135,7 +140,12 @@ app.add_middleware(RequestLoggingMiddleware)
 # 2. Input Sanitization (sanitize JSON payloads)
 app.add_middleware(InputSanitizationMiddleware)
 
-logger.info("✅ Security middleware added: InputSanitization, RequestLogging")
+from fastapi.middleware.gzip import GZipMiddleware
+
+# 3. GZip Compression (for faster dashboard loading)
+app.add_middleware(GZipMiddleware, minimum_size=1000)
+
+logger.info("✅ Security middleware added: InputSanitization, RequestLogging, GZip")
 
 # --------------------------------------------------------------------------
 # CORS — CRITICAL for frontend ↔ backend communication

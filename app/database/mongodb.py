@@ -45,6 +45,9 @@ def get_database():
 
 # Helper to get collections
 def get_collection(name: str):
+    if db.db is None:
+        logger.error(f"❌ Database not initialized! Cannot get collection '{name}'.")
+        raise RuntimeError("Database connection not established. Check if connect_to_mongo() was called and succeeded.")
     return db.db[name]
 
 

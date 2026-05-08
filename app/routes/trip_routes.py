@@ -1,7 +1,10 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import JSONResponse
 from bson import ObjectId
 from datetime import datetime, timedelta
 import logging
+import uuid
+from app.core.config import settings
 from app.db.mongodb import trips_collection, itineraries_collection, broker_itineraries_collection
 from app.routes.auth_routes import get_current_user_obj
 from app.core.validation import (
@@ -27,7 +30,8 @@ async def create_trip(
     """
     Create or reuse a trip with validation.
     """
-    request_id = f"TRIP-{id(data)}"
+    # Generate a unique request ID for tracing
+    request_id = f"TRIP-{uuid.uuid4().hex[:8]}"
     logger.info(f"[{request_id}] 🆕 CREATE_TRIP attempt | User: {current_user.get('email')}")
     
     try:
@@ -71,12 +75,16 @@ async def create_trip(
                 errors.append(e)
 
         # ========== BUDGET VALIDATION ==========
-        budget = data.get("budget")
-        if budget:
+        raw_budget = data.get("budget")
+        budget = 0
+        if raw_budget:
             try:
-                budget = validate_integer(budget, "budget", min_value=1)
-            except ValidationError as e:
-                errors.append(e)
+                # If numeric string or int, convert
+                budget = int(float(str(raw_budget)))
+            except (ValueError, TypeError):
+                # If it's a category string like 'moderate', just store 0 for now
+                logger.debug(f"[{request_id}] Budget is categorical: {raw_budget}")
+                budget = 0
 
         # ========== BROKER ID VALIDATION ==========
         broker_id = data.get("broker_id")
@@ -112,7 +120,8 @@ async def create_trip(
                 "success": True,
                 "message": "Trip details retrieved",
                 "trip_id": str(existing_trip["_id"]),
-                "reused": True
+                "reused": True,
+                "status": existing_trip.get("status", "draft")
             }
 
         # ========== CREATE NEW TRIP ==========
@@ -122,8 +131,8 @@ async def create_trip(
             "itinerary_source_id": itinerary_obj_id,
             "broker_id": broker_obj_id,
             "status": "chatting" if broker_obj_id else "draft",
-            "destination": destination,
-            "budget": budget,
+            "destination": destination or "Pakistan",
+            "budget": budget or 0,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow()
         }
@@ -135,14 +144,29 @@ async def create_trip(
             "success": True,
             "message": "Trip created successfully",
             "trip_id": str(result.inserted_id),
-            "reused": False
+            "reused": False,
+            "status": trip_doc["status"]
         }
 
+    except ValidationError as e:
+        logger.warning(f"[{request_id}] ❌ Validation error: {e.message}")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": e.message,
+                "field": e.field
+            }
+        )
     except Exception as e:
-        logger.error(f"[{request_id}] 💥 Error creating trip: {str(e)}", exc_info=True)
+        logger.error(f"[{request_id}] 💥 CRITICAL ERROR: {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"success": False, "message": "Internal server error while creating trip"}
+            content={
+                "success": False,
+                "message": "A critical server error occurred while creating your trip.",
+                "debug_info": str(e) if settings.DEBUG else None
+            }
         )
 
 #------------------------------------------------------------

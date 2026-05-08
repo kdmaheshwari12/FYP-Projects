@@ -1,5 +1,6 @@
 # app/routes/traveler_routes.py
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, status
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from app.db.mongodb import (
     users_collection,
@@ -121,9 +122,20 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
     email = payload["sub"]
     
     # ========== MESSAGE VALIDATION & SANITIZATION ==========
+    user_msg_raw = message.get("message")
+    if user_msg_raw is None:
+        logger.warning(f"Chat request missing 'message' key. Received keys: {list(message.keys())}")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "success": False,
+                "message": "Required field 'message' is missing in request body."
+            }
+        )
+
     try:
         user_msg = validate_string(
-            message.get("message"),
+            user_msg_raw,
             "message",
             allow_empty=False,
             min_length=1,
@@ -142,7 +154,11 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
     try:
         user = await users_collection.find_one({"email": email})
         if not user:
-            raise HTTPException(status_code=404, detail="User not found")
+            logger.warning(f"Chat attempt by non-existent user: {email}")
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "User profile not found"}
+            )
 
         user_id = user["_id"]
         conversationId = f"conv-{user_id}"   # persistent conversation ID
@@ -158,14 +174,77 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
             receiverType="ai",
             text=user_msg
         )
+    except Exception as e:
+        logger.error(f"Error initializing chat for {email}: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": "Could not initialize chat session"}
+        )
 
+    try:
         # 0️⃣ GREETINGS
         greetings = ["hi", "hello", "hey", "salam", "assalamualaikum",
                      "good morning", "good evening"]
 
         if msg_lower in greetings or any(msg_lower.startswith(g) for g in greetings):
-
             bot_reply = "Hello! 👋 How can I help you with your travel planning today?"
+            # Log bot reply
+            await log_message(
+                conversationId=conversationId,
+                senderId=None,
+                receiverId=user_id,
+                senderType="ai",
+                receiverType="traveler",
+                text=bot_reply
+            )
+            logger.info(f"[{conversationId}] ✅ AI reply generated (Greeting)")
+            return {
+                "success": True,
+                "reply": bot_reply
+            }
+
+        # If not a greeting, proceed to AI logic...
+        # 1️⃣ FETCH USER'S STORED ITINERARIES
+        itineraries = await itineraries_collection.find({"user_email": email}).to_list(None)
+        known_cities = [it["destination"].lower() for it in itineraries]
+
+        # 2️⃣ DETECT IF USER WANTS MODIFICATION
+        modification_keywords = [
+            "shorten", "modify", "fix", "adjust", "update",
+            "change", "edit", "remove", "replace", "add",
+            "revise", "rearrange"
+        ]
+        is_modification = any(kw in msg_lower for kw in modification_keywords)
+
+        # 3️⃣ HYBRID CITY DETECTION
+        detected_city = await detect_city_hybrid(user_msg)
+
+        # --------------------------
+        # MODE 1 — GENERAL TRAVEL INFO
+        # --------------------------
+        if not is_modification:
+
+            system_prompt = """
+You are a Pakistan-specific travel assistant.
+
+RULES:
+1. Only answer travel-related questions about Pakistan.
+2. If the city is outside Pakistan, reply:
+   "Sorry, I can only provide travel information for places inside Pakistan."
+3. Do NOT mention itineraries in this mode.
+4. Respond naturally and keep answers short.
+"""
+
+            response = groq_client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_msg}
+                ]
+            )
+
+            bot_reply = response.choices[0].message.content
+            logger.info(f"[{conversationId}] ✅ AI General Reply generated")
 
             # Log bot reply
             await log_message(
@@ -177,111 +256,48 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
                 text=bot_reply
             )
 
-        logger.info(f"[{conversationId}] ✅ AI reply generated successfully")
-        return {
-            "success": True,
-            "reply": bot_reply
-        }
-
-    except Exception as e:
-        logger.error(f"[{conversationId}] 💥 Error in chatbot: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={
-                "success": False,
-                "message": "AI service encountered an error. Please try again."
+            return {
+                "success": True,
+                "reply": bot_reply
             }
-        )
 
-    # 1️⃣ FETCH USER'S STORED ITINERARIES
-    itineraries = await itineraries_collection.find({"user_email": email}).to_list(None)
-    known_cities = [it["destination"].lower() for it in itineraries]
+        # --------------------------
+        # MODE 2 — ITINERARY MODIFICATION
+        # --------------------------
+        if not detected_city:
+            bot_reply = "Please specify a Pakistan city for the itinerary you want to modify."
 
-    # 2️⃣ DETECT IF USER WANTS MODIFICATION
-    modification_keywords = [
-        "shorten", "modify", "fix", "adjust", "update",
-        "change", "edit", "remove", "replace", "add",
-        "revise", "rearrange"
-    ]
-    is_modification = any(kw in msg_lower for kw in modification_keywords)
+            await log_message(
+                conversationId=conversationId,
+                senderId=None,
+                receiverId=user_id,
+                senderType="ai",
+                receiverType="traveler",
+                text=bot_reply
+            )
+            return {
+                "success": True,
+                "reply": bot_reply
+            }
 
-    # 3️⃣ HYBRID CITY DETECTION
-    detected_city = await detect_city_hybrid(user_msg)
+        # Check if itinerary exists
+        itinerary = next((it for it in itineraries if it["destination"].lower() == detected_city), None)
 
-    # --------------------------
-    # MODE 1 — GENERAL TRAVEL INFO
-    # --------------------------
-    if not is_modification:
+        if not itinerary:
+            bot_reply = f"You do not have an itinerary for {detected_city.capitalize()}. Please generate one first."
 
-        system_prompt = """
-You are a Pakistan-specific travel assistant.
+            await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
 
-RULES:
-1. Only answer travel-related questions about Pakistan.
-2. If the city is outside Pakistan, reply:
-   "Sorry, I can only provide travel information for places inside Pakistan."
-3. Do NOT mention itineraries in this mode.
-4. Respond naturally and keep answers short.
-"""
+            return {
+                "success": True,
+                "reply": bot_reply
+            }
 
-        response = groq_client.chat.completions.create(
-            model="llama-3.1-8b-instant",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg}
-            ]
-        )
+        itinerary_days = itinerary["itinerary_days"]
+        itinerary_json = json.dumps(itinerary_days)
 
-        bot_reply = response.choices[0].message.content
-        logger.info(f"[{conversationId}] ✅ AI General Reply generated")
-
-        # Log bot reply
-        await log_message(
-            conversationId=conversationId,
-            senderId=None,
-            receiverId=user_id,
-            senderType="ai",
-            receiverType="traveler",
-            text=bot_reply
-        )
-
-        return {
-            "success": True,
-            "reply": bot_reply
-        }
-
-    # --------------------------
-    # MODE 2 — ITINERARY MODIFICATION
-    # --------------------------
-    if not detected_city:
-        bot_reply = "Please specify a Pakistan city for the itinerary you want to modify."
-
-        await log_message(
-            conversationId=conversationId,
-            senderId=None,
-            receiverId=user_id,
-            senderType="ai",
-            receiverType="traveler",
-            text=bot_reply
-        )
-
-        return {"reply": bot_reply}
-
-    # Check if itinerary exists
-    itinerary = next((it for it in itineraries if it["destination"].lower() == detected_city), None)
-
-    if not itinerary:
-        bot_reply = f"You do not have an itinerary for {detected_city.capitalize()}. Please generate one first."
-
-        await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
-
-        return {"reply": bot_reply}
-
-    itinerary_days = itinerary["itinerary_days"]
-    itinerary_json = json.dumps(itinerary_days)
-
-    # LLM Prompt
-    system_prompt = f"""
+        # LLM Prompt
+        system_prompt = f"""
 You are an itinerary editor for {detected_city.capitalize()}.
 
 RULES:
@@ -292,7 +308,7 @@ RULES:
 - Return ONLY valid JSON.
 """
 
-    user_prompt = f"""
+        user_prompt = f"""
 Existing itinerary:
 {itinerary_json}
 
@@ -300,84 +316,114 @@ User request:
 "{user_msg}"
 """
 
-    res = groq_client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-    )
+        res = groq_client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+        )
 
-    ai_raw = res.choices[0].message.content
+        ai_raw = res.choices[0].message.content
 
-    try:
-        ai_json = json.loads(ai_raw)
-    except:
-        bot_reply = "Sorry, I couldn't process that request. Please try again."
+        try:
+            ai_json = json.loads(ai_raw)
+        except:
+            bot_reply = "Sorry, I couldn't process that request. Please try again."
 
-        await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
+            await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
 
-        return {"reply": bot_reply}
+            return {
+                "success": True,
+                "reply": bot_reply
+            }
 
-    # Fallback responses
-    if ai_json.get("operation") == "chat":
-        bot_reply = ai_json["reply"]
+        # Fallback responses
+        if ai_json.get("operation") == "chat":
+            bot_reply = ai_json["reply"]
 
-        await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
+            await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
 
-        return {"reply": bot_reply}
+            return {
+                "success": True,
+                "reply": bot_reply
+            }
 
-    # Apply modification
-    updated = ai_json.get("updated_itinerary", [])
+        # Apply modification
+        updated = ai_json.get("updated_itinerary", [])
 
-    # Validation
-    if len(updated) != len(itinerary_days):
-        bot_reply = "Error: Number of days cannot be changed."
+        # Validation
+        if len(updated) != len(itinerary_days):
+            bot_reply = "Error: Number of days cannot be changed."
 
-        await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
+            await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
 
-        return {"reply": bot_reply}
+            return {
+                "success": True,
+                "reply": bot_reply
+            }
 
-    for day in updated:
-        seen = set()
-        for item in day["schedule"]:
-            if not item.get("time") or not item.get("activity"):
-                bot_reply = "Error: Time and activity must not be empty."
+        for day in updated:
+            seen = set()
+            for item in day["schedule"]:
+                if not item.get("time") or not item.get("activity"):
+                    bot_reply = "Error: Time and activity must not be empty."
 
-                await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
+                    await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
 
-                return {"reply": bot_reply}
+                    return {
+                "success": True,
+                "reply": bot_reply
+            }
 
-            if item["activity"] in seen:
-                bot_reply = "Error: Duplicate activities found."
+                if item["activity"] in seen:
+                    bot_reply = "Error: Duplicate activities found."
 
-                await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
+                    await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply)
 
-                return {"reply": bot_reply}
+                    return {
+                "success": True,
+                "reply": bot_reply
+            }
 
-            seen.add(item["activity"])
+                seen.add(item["activity"])
 
-    # Save updated itinerary
-    await itineraries_collection.update_one(
-        {"_id": itinerary["_id"]},
-        {"$set": {"itinerary_days": updated}}
-    )
+        # Save updated itinerary
+        await itineraries_collection.update_one(
+            {"_id": itinerary["_id"]},
+            {"$set": {"itinerary_days": updated}}
+        )
 
-    bot_reply = f"Your {detected_city.capitalize()} itinerary has been updated! 🎉"
+        bot_reply = f"Your {detected_city.capitalize()} itinerary has been updated! 🎉"
 
-    # Log success message
-    await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply, meta=updated)
+        # Log success message
+        await log_message(conversationId, None, user_id, "ai", "traveler", bot_reply, meta=updated)
 
-    return {
-        "reply": bot_reply,
-        "updated_itinerary": updated
-    }
+        return {
+            "success": True,
+            "reply": bot_reply,
+            "updated_itinerary": updated
+        }
+    except Exception as e:
+        logger.error(f"[{conversationId}] 💥 Error in chatbot: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False,
+                "message": "AI service encountered an error. Please try again."
+            }
+        )
 
+
+# Simple global cache for suggested itineraries
+SUGGESTED_CACHE = {"data": [], "timestamp": datetime.min}
+CACHE_TTL = timedelta(minutes=10)
 
 # 1️⃣ Traveler Dashboard
 @router.get("/dashboard")
 async def get_dashboard(token: str = Depends(oauth2_scheme)):
     """Get traveler dashboard data (My Trips + Suggested Itineraries)"""
+    global SUGGESTED_CACHE
     payload = decode_access_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -389,15 +435,21 @@ async def get_dashboard(token: str = Depends(oauth2_scheme)):
     for trip in my_trips:
         trip["_id"] = str(trip["_id"])
 
-    # Fetch 3 random suggested itineraries
-    suggested = await itineraries_collection.aggregate([{"$sample": {"size": 3}}]).to_list(None)
-    for s in suggested:
-        s["_id"] = str(s["_id"])
+    # Fetch/Cache suggested itineraries
+    now = datetime.utcnow()
+    if not SUGGESTED_CACHE["data"] or (now - SUGGESTED_CACHE["timestamp"]) > CACHE_TTL:
+        suggested = await itineraries_collection.aggregate([{"$sample": {"size": 3}}]).to_list(None)
+        for s in suggested:
+            s["_id"] = str(s["_id"])
+        SUGGESTED_CACHE = {"data": suggested, "timestamp": now}
+        logger.info("🆕 Dashboard suggested trips cache REFRESHED")
+    else:
+        logger.debug("⚡ Dashboard suggested trips cache HIT")
 
     return {
         "message": "Traveler dashboard loaded successfully",
         "my_trips": my_trips,
-        "suggested_trips": suggested,
+        "suggested_trips": SUGGESTED_CACHE["data"],
     }
 
 

@@ -105,15 +105,17 @@ async def submit_review(
     itinerary = await broker_itineraries_collection.find_one(
         {"_id": itinerary_obj_id}
     )
+    is_broker_itinerary = True
     if not itinerary:
         itinerary = await itineraries_collection.find_one({"_id": itinerary_obj_id})
+        is_broker_itinerary = False
     
     if not itinerary:
         logger.warning(f"Itinerary not found: {itinerary_id}")
         raise HTTPException(status_code=404, detail="Itinerary not found")
     
-    # ❌ Prevent reviewing unpublished itineraries
-    if not itinerary.get("is_published", False):
+    # ❌ Prevent reviewing unpublished itineraries (only for broker itineraries)
+    if is_broker_itinerary and not itinerary.get("is_published", False):
         logger.warning(f"Cannot review unpublished itinerary: {itinerary_id}")
         raise HTTPException(
             status_code=400,
@@ -121,38 +123,47 @@ async def submit_review(
         )
     
     # ❌ Prevent broker reviewing their own itinerary
-    if itinerary["brokerId"] == ObjectId(current_user["_id"]):
+    broker_id_val = itinerary.get("brokerId")
+    if broker_id_val and str(broker_id_val) == str(current_user["_id"]):
         logger.warning(f"User attempted to review their own itinerary: {current_user['_id']}")
         raise HTTPException(
             status_code=403,
             detail="You cannot review your own itinerary"
         )
     
-    # ========== CREATE REVIEW ==========
+    # ========== UPSERT REVIEW ==========
     try:
-        review_doc = {
+        filter_query = {
             "itineraryId": itinerary_obj_id,
-            "brokerId": itinerary.get("brokerId"),
-            "userId": ObjectId(current_user["_id"]),
-            "rating": validated_rating,
-            "comment": validated_comment,
-            "created_at": datetime.utcnow()
+            "userId": ObjectId(current_user["_id"])
         }
         
-        await broker_reviews_collection.insert_one(review_doc)
+        update_doc = {
+            "$set": {
+                "brokerId": itinerary.get("brokerId"),
+                "rating": validated_rating,
+                "comment": validated_comment,
+                "updated_at": datetime.utcnow()
+            },
+            "$setOnInsert": {
+                "created_at": datetime.utcnow()
+            }
+        }
         
-        logger.info(f"✅ Review submitted successfully by user: {current_user['_id']}")
+        await broker_reviews_collection.update_one(filter_query, update_doc, upsert=True)
+        
+        logger.info(f"✅ Review processed (upserted) by user: {current_user['_id']} for itinerary: {itinerary_id}")
         
         return {
             "success": True,
             "message": "Review submitted successfully"
         }
         
-    except DuplicateKeyError:
-        logger.warning(f"⚠️ Duplicate review attempt: user={current_user['_id']}, itinerary={itinerary_id}")
+    except Exception as e:
+        logger.error(f"💥 Error submitting review: {str(e)}", exc_info=True)
         return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "You have already reviewed this itinerary"}
+            status_code=500,
+            content={"success": False, "message": "Failed to submit review. Please try again."}
         )
     except Exception as e:
         logger.error(f"💥 Error submitting review: {str(e)}", exc_info=True)

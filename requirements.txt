@@ -1,10 +1,13 @@
 fastapi
 uvicorn
 motor
+dnspython
+pytz
 python-jose[cryptography]
 passlib[bcrypt]
 bcrypt<4.1.0
 python-dotenv
+email-validator
 pydantic[email]
 pydantic-settings
 httpx

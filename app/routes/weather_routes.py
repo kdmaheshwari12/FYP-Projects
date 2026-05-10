@@ -1,216 +1,411 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 import httpx
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
 from app.db.mongodb import weather_collection, itineraries_collection
-from app.core.validation import validate_string, ValidationError
+from app.core.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/weather", tags=["Weather"])
 
-from app.core.config import settings
+# ====================================================
+# 1. CITY NORMALIZATION
+# ====================================================
+CITY_MAPPINGS = {
+    "Hunza": "Karimabad,PK",
+    "Hunza Valley": "Karimabad,PK",
+    "Skardu": "Skardu,PK",
+    "Fairy Meadows": "Gilgit,PK",
+    "Kashmir": "Muzaffarabad,PK",
+    "Swat": "Mingora,PK",
+    "Naran": "Naran,PK",
+    "Kaghan": "Kaghan,PK",
+    "Neelum Valley": "Muzaffarabad,PK",
+    "Gilgit Baltistan": "Gilgit,PK",
+    "Naltar": "Gilgit,PK",
+    "Deosai": "Skardu,PK",
+}
 
-@router.get("/live")
-async def get_live_weather(city: str):
+def normalize_city(city: str) -> str:
+    if not city:
+        return ""
+    stripped = city.strip().title()
+    return CITY_MAPPINGS.get(stripped, f"{stripped},PK")
+
+# ====================================================
+# 2. DIAGNOSTIC ENDPOINT — /weather/debug
+# Run this first to confirm API key + connectivity
+# ====================================================
+@router.get("/debug")
+async def debug_weather():
     """
-    Get live weather for a city with validation and caching.
+    Diagnostic endpoint.
+    Checks: API key presence, OpenWeather connectivity, test city fetch.
+    Hit GET /weather/debug to diagnose any weather issues.
     """
-    # 1️⃣ Validate City
+    api_key = settings.OPENWEATHER_API_KEY
+    key_present = bool(api_key)
+    key_preview = (api_key[:6] + "...") if api_key else "MISSING"
+
+    print(f"[DEBUG] OPENWEATHER_API_KEY present: {key_present}, preview: {key_preview}")
+
+    if not api_key:
+        return {
+            "step": "api_key_check",
+            "ok": False,
+            "error": "OPENWEATHER_API_KEY is not set in environment variables",
+            "fix": "Set OPENWEATHER_API_KEY in Railway environment variables"
+        }
+
+    # Test with a well-known city
+    test_url = f"https://api.openweathermap.org/data/2.5/weather?q=Karachi,PK&appid={api_key}&units=metric"
+    print(f"[DEBUG] Testing URL: {test_url}")
+
     try:
-        validated_city = validate_string(city, "city", allow_empty=False, min_length=2).title()
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=f"Invalid city name: {e.message}")
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(test_url)
 
-    # 2️⃣ Check Cache (last 15 minutes)
+        print(f"[DEBUG] Test status: {resp.status_code}")
+        print(f"[DEBUG] Test body: {resp.text[:300]}")
+
+        if resp.status_code == 200:
+            data = resp.json()
+            return {
+                "step": "api_connectivity",
+                "ok": True,
+                "key_preview": key_preview,
+                "test_city": "Karachi,PK",
+                "temperature": data["main"]["temp"],
+                "condition": data["weather"][0]["description"],
+                "message": "Weather API is working correctly ✅"
+            }
+        elif resp.status_code == 401:
+            return {
+                "step": "api_key_validation",
+                "ok": False,
+                "status": 401,
+                "error": "API key is invalid or unauthorized",
+                "fix": "Verify OPENWEATHER_API_KEY value in Railway env vars"
+            }
+        else:
+            return {
+                "step": "api_connectivity",
+                "ok": False,
+                "status": resp.status_code,
+                "error": resp.text[:200]
+            }
+    except Exception as e:
+        return {
+            "step": "network",
+            "ok": False,
+            "error": str(e),
+            "fix": "Check Railway outbound network connectivity"
+        }
+
+# ====================================================
+# 3. LIVE WEATHER — /weather/live?city=...
+# ====================================================
+@router.get("/live")
+async def get_live_weather(city: str = Query(..., min_length=2)):
+    """
+    Get live weather with city normalization and caching.
+    """
+    search_city = normalize_city(city)
+    api_key = settings.OPENWEATHER_API_KEY
+
+    print(f"[WEATHER/LIVE] city='{city}' → normalized='{search_city}'")
+
+    # Guard: missing API key
+    if not api_key:
+        logger.error("[WEATHER/LIVE] OPENWEATHER_API_KEY is missing!")
+        print("[WEATHER/LIVE] ❌ OPENWEATHER_API_KEY not set in environment")
+        return {
+            "success": False,
+            "message": "Weather service not configured (missing API key)",
+            "data": None
+        }
+
+    # 1. Check Cache (15 min)
     try:
         cached = await weather_collection.find_one({
-            "city": validated_city,
+            "city": search_city,
+            "type": "live",
             "timestamp": {"$gte": datetime.utcnow() - timedelta(minutes=15)}
         })
-        if cached and "weather_summary" in cached:
-            logger.info(f"Weather cache hit for {validated_city}")
-            return cached["weather_summary"]
+        if cached and "raw_data" in cached:
+            print(f"[WEATHER/LIVE] ✅ Cache hit for '{search_city}'")
+            return {"success": True, "source": "cache", "data": cached["raw_data"]}
     except Exception as e:
-        logger.error(f"Cache lookup failed: {e}")
+        logger.error(f"[WEATHER/LIVE] Cache error: {e}")
 
-    # 3️⃣ Fetch from OpenWeather
-    api_key = settings.OPENWEATHER_API_KEY
-    if not api_key:
-        logger.error("OPENWEATHER_API_KEY is missing in settings")
-        raise HTTPException(status_code=500, detail="Weather service configuration error")
-
-    url = f"https://api.openweathermap.org/data/2.5/weather?q={validated_city}&appid={api_key}&units=metric"
-    
-    logger.debug(f"Fetching weather from: {url}")
+    # 2. Fetch from OpenWeather
+    url = (
+        f"https://api.openweathermap.org/data/2.5/weather"
+        f"?q={search_city}&appid={api_key}&units=metric"
+    )
+    print(f"[WEATHER/LIVE] Fetching: {url}")
 
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             response = await client.get(url)
-            
-        logger.debug(f"Weather API status: {response.status_code}")
-        logger.debug(f"Weather API body: {response.text}")
+
+        print(f"[WEATHER/LIVE] Status: {response.status_code}")
+        print(f"[WEATHER/LIVE] Body: {response.text[:300]}")
 
         if response.status_code == 401:
-            logger.error("Invalid OpenWeather API Key")
-            raise HTTPException(status_code=503, detail="Weather service unavailable (auth error)")
-        
+            logger.error("[WEATHER/LIVE] API key rejected (401)")
+            return {
+                "success": False,
+                "message": "Weather API key invalid — contact admin",
+                "data": None
+            }
+
         if response.status_code == 404:
-            raise HTTPException(status_code=404, detail=f"City '{validated_city}' not found")
+            # Try without country code as fallback
+            fallback_city = city.strip().title()
+            fallback_url = (
+                f"https://api.openweathermap.org/data/2.5/weather"
+                f"?q={fallback_city}&appid={api_key}&units=metric"
+            )
+            print(f"[WEATHER/LIVE] 404 — retrying without ,PK: {fallback_url}")
+            async with httpx.AsyncClient(timeout=10) as client:
+                fallback_resp = await client.get(fallback_url)
+            print(f"[WEATHER/LIVE] Fallback status: {fallback_resp.status_code}")
+
+            if fallback_resp.status_code == 200:
+                data = fallback_resp.json()
+                await _cache_weather(search_city, data)
+                return {"success": True, "data": data}
+
+            return {
+                "success": False,
+                "message": f"Location '{city}' not found. Try a nearby major city.",
+                "data": None
+            }
 
         if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="Weather API error")
+            logger.error(f"[WEATHER/LIVE] Unexpected status {response.status_code}: {response.text[:200]}")
+            return {
+                "success": False,
+                "message": f"Weather service error (HTTP {response.status_code})",
+                "data": None
+            }
+
+        data = response.json()
+        await _cache_weather(search_city, data)
+
+        print(f"[WEATHER/LIVE] ✅ Success: {data.get('name')} {data['main']['temp']}°C")
+        return {"success": True, "data": data}
+
+    except httpx.TimeoutException:
+        logger.error("[WEATHER/LIVE] Request timed out")
+        return {"success": False, "message": "Weather service timed out", "data": None}
+    except Exception as e:
+        logger.error(f"[WEATHER/LIVE] Exception: {e}", exc_info=True)
+        return {"success": False, "message": "Unexpected weather error", "data": None}
+
+
+async def _cache_weather(city_key: str, data: dict):
+    """Helper to upsert weather data into MongoDB cache."""
+    try:
+        await weather_collection.update_one(
+            {"city": city_key, "type": "live"},
+            {"$set": {"raw_data": data, "timestamp": datetime.utcnow()}},
+            upsert=True
+        )
+    except Exception as e:
+        logger.error(f"[WEATHER/LIVE] Cache write failed: {e}")
+
+
+# ====================================================
+# 4. FORECAST — /weather/forecast?city=...
+# ====================================================
+@router.get("/forecast")
+async def get_forecast(city: str = Query(..., min_length=2)):
+    """
+    5-day forecast with normalization and safe error handling.
+    """
+    search_city = normalize_city(city)
+    api_key = settings.OPENWEATHER_API_KEY
+
+    print(f"[WEATHER/FORECAST] city='{city}' → normalized='{search_city}'")
+
+    if not api_key:
+        print("[WEATHER/FORECAST] ❌ OPENWEATHER_API_KEY not set")
+        return {"success": False, "message": "Weather service not configured", "data": None}
+
+    url = (
+        f"https://api.openweathermap.org/data/2.5/forecast"
+        f"?q={search_city}&appid={api_key}&units=metric"
+    )
+    print(f"[WEATHER/FORECAST] Fetching: {url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url)
+
+        print(f"[WEATHER/FORECAST] Status: {response.status_code}")
+
+        if response.status_code == 401:
+            return {"success": False, "message": "Weather API key invalid", "data": None}
+
+        if response.status_code == 404:
+            return {
+                "success": False,
+                "message": f"Forecast not available for '{city}'",
+                "data": None
+            }
+
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "message": f"Forecast service error (HTTP {response.status_code})",
+                "data": None
+            }
+
+        data = response.json()
+        return {"success": True, "forecast": data}
+
+    except httpx.TimeoutException:
+        return {"success": False, "message": "Forecast service timed out", "data": None}
+    except Exception as e:
+        logger.error(f"[WEATHER/FORECAST] Exception: {e}", exc_info=True)
+        return {"success": False, "message": "Unexpected forecast error", "data": None}
+
+
+# ====================================================
+# 1. CITY NORMALIZATION
+# ====================================================
+CITY_MAPPINGS = {
+    "Hunza": "Karimabad,PK",
+    "Hunza Valley": "Karimabad,PK",
+    "Skardu": "Skardu,PK",
+    "Fairy Meadows": "Gilgit,PK",
+    "Kashmir": "Muzaffarabad,PK",
+    "Swat": "Mingora,PK",
+    "Naran": "Naran,PK",
+    "Kaghan": "Kaghan,PK"
+}
+
+def normalize_city(city: str) -> str:
+    if not city:
+        return ""
+    stripped = city.strip().title()
+    return CITY_MAPPINGS.get(stripped, f"{stripped},PK")
+
+# ====================================================
+# 2. ENDPOINTS
+# ====================================================
+
+@router.get("/live")
+async def get_live_weather(city: str = Query(..., min_length=2)):
+    """
+    Get live weather with normalization and safe error handling.
+    """
+    search_city = normalize_city(city)
+    api_key = settings.OPENWEATHER_API_KEY
+    
+    # 1. Check Cache (15 min)
+    try:
+        cached = await weather_collection.find_one({
+            "city": search_city,
+            "type": "live",
+            "timestamp": {"$gte": datetime.utcnow() - timedelta(minutes=15)}
+        })
+        if cached:
+            return {
+                "success": True,
+                "source": "cache",
+                "data": cached["raw_data"]
+            }
+    except Exception as e:
+        logger.error(f"Cache error: {e}")
+
+    # 2. Fetch from OpenWeather
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={search_city}&appid={api_key}&units=metric"
+    
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url)
+            
+        if response.status_code == 404:
+            return {
+                "success": False,
+                "message": f"Location '{city}' not recognized by weather service",
+                "data": None
+            }
+            
+        if response.status_code != 200:
+            logger.error(f"Weather API Error {response.status_code}: {response.text}")
+            return {
+                "success": False,
+                "message": "Weather service currently unavailable",
+                "data": None
+            }
 
         data = response.json()
         
-        # 4️⃣ Format Response
-        summary = {
-            "city": data.get("name", validated_city),
-            "temperature": round(data["main"]["temp"]),
-            "humidity": data["main"]["humidity"],
-            "condition": data["weather"][0]["description"]
-        }
-
-        # 5️⃣ Update Cache
-        try:
-            await weather_collection.insert_one({
-                "city": validated_city,
-                "weather_summary": summary,
-                "raw_response": data,
-                "timestamp": datetime.utcnow()
-            })
-        except Exception as e:
-            logger.error(f"Failed to cache weather: {e}")
-
-        return summary
-
-    except httpx.TimeoutException:
-        logger.error("Weather API timeout")
-        raise HTTPException(status_code=504, detail="Weather service timed out")
-    except httpx.RequestError as e:
-        logger.error(f"Weather API connection error: {e}")
-        raise HTTPException(status_code=503, detail="Weather service unreachable")
-    except Exception as e:
-        if isinstance(e, HTTPException): raise e
-        logger.error(f"Unexpected weather error: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal weather service error")
-
-def serialize_mongo_doc(doc: dict):
-    """
-    Converts ObjectId → string so FastAPI can return the document safely.
-    """
-    for key, value in doc.items():
-        if isinstance(value, ObjectId):
-            doc[key] = str(value)
-        # also check nested fields
-        if isinstance(value, dict):
-            doc[key] = serialize_mongo_doc(value)
-        if isinstance(value, list):
-            doc[key] = [serialize_mongo_doc(v) if isinstance(v, dict) else v for v in value]
-    return doc
-
-
-async def fetch_openweather(url: str):
-    """
-    Helper to fetch weather data from OpenWeather API
-    """
-    async with httpx.AsyncClient() as client:
-        res = await client.get(url)
-        data = res.json()
-
-    if res.status_code != 200:
-        raise HTTPException(400, detail=data)
-
-    return data
-
-
-# -------- 2) GET WEATHER HISTORY -------- #
-@router.get("/history/{city}")
-async def get_weather_history(city: str):
-
-    records = (
-        await weather_collection.find({"city": city})
-        .sort("timestamp", -1)
-        .to_list(None)
-    )
-
-    # Convert each MongoDB document
-    records = [serialize_mongo_doc(r) for r in records]
-
-    return {
-        "city": city,
-        "count": len(records),
-        "history": records,
-    }
-
-# -------- 3) FETCH WEATHER FOR ITINERARY -------- #
-@router.post("/itinerary/{itinerary_id}")
-async def fetch_itinerary_weather(itinerary_id: str):
-
-    try:
-        itinerary = await itineraries_collection.find_one({"_id": ObjectId(itinerary_id)})
-
-        if not itinerary:
-            raise HTTPException(404, "Itinerary not found")
-
-        city = itinerary.get("destination")
-        if not city:
-            raise HTTPException(400, "Itinerary has no destination field")
-
-        # Fetch live weather for itinerary city
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={settings.OPENWEATHER_API_KEY}&units=metric"
-
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url)
-            data = res.json()
-
-        if res.status_code != 200:
-            raise HTTPException(400, data)
-
-        # Save inside itinerary document
-        await itineraries_collection.update_one(
-            {"_id": itinerary["_id"]},
-            {"$set": {"latestWeather": data, "weatherUpdatedAt": datetime.utcnow()}}
+        # 3. Update Cache
+        await weather_collection.update_one(
+            {"city": search_city, "type": "live"},
+            {"$set": {"raw_data": data, "timestamp": datetime.utcnow()}},
+            upsert=True
         )
 
         return {
-            "status": "success",
-            "destination": city,
-            "message": "Weather updated for itinerary",
-            "weather": data
+            "success": True,
+            "data": data
         }
 
     except Exception as e:
-        raise HTTPException(500, f"Weather update error: {str(e)}")
-    
-@router.get("/forecast")
-async def get_forecast(city: str):
-    try:
-        url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={settings.OPENWEATHER_API_KEY}&units=metric"
-
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url)
-            data = res.json()
-
-        if res.status_code != 200:
-            raise HTTPException(400, data)
-
-        # Store forecast snapshot
-        record = {
-            "city": city,
-            "type": "forecast",
-            "data": data,
-            "timestamp": datetime.utcnow()
-        }
-        await weather_collection.insert_one(record)
-
+        logger.error(f"Weather fetch exception: {e}")
         return {
-            "status": "success",
-            "message": "5-day forecast fetched & stored",
+            "success": False,
+            "message": "Failed to connect to weather service",
+            "data": None
+        }
+
+@router.get("/forecast")
+async def get_forecast(city: str = Query(..., min_length=2)):
+    """
+    Get 5-day forecast with normalization and safe error handling.
+    """
+    search_city = normalize_city(city)
+    api_key = settings.OPENWEATHER_API_KEY
+
+    url = f"https://api.openweathermap.org/data/2.5/forecast?q={search_city}&appid={api_key}&units=metric"
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            response = await client.get(url)
+
+        if response.status_code == 404:
+            return {
+                "success": False,
+                "message": f"Forecast unavailable for '{city}'",
+                "data": None
+            }
+
+        if response.status_code != 200:
+            return {
+                "success": False,
+                "message": "Forecast service currently unavailable",
+                "data": None
+            }
+
+        data = response.json()
+        return {
+            "success": True,
             "forecast": data
         }
 
     except Exception as e:
-        raise HTTPException(500, f"Forecast fetch error: {str(e)}")
+        logger.error(f"Forecast fetch exception: {e}")
+        return {
+            "success": False,
+            "message": "Failed to connect to forecast service",
+            "data": None
+        }

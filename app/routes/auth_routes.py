@@ -63,45 +63,47 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 _bearer = HTTPBearer()
 
 
+from jose import JWTError, ExpiredSignatureError
+
 async def get_current_user_obj(
     credentials: HTTPAuthorizationCredentials = Depends(_bearer),
 ) -> dict:
     """
     FastAPI dependency that verifies the backend JWT and returns the
     MongoDB user document with ``_id`` converted to a string.
-
-    This is the "raw doc" variant used by legacy route files that
-    reference ``current_user["_id"]`` directly.
     """
     token = credentials.credentials
 
-    payload = decode_access_token(token)
-    if payload is None:
+    try:
+        payload = decode_access_token(token)
+        email: str = payload.get("sub")
+        if not email:
+            raise JWTError("Missing 'sub' claim")
+
+        user = await users_col.find_one({"email": email})
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+            
+        # Convert ObjectId → string
+        user["_id"] = str(user["_id"])
+        return user
+
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except JWTError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
             headers={"WWW-Authenticate": "Bearer"},
         )
-
-    email: str = payload.get("sub")
-    if not email:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    user = await users_col.find_one({"email": email})
-    if user is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-
-    # Convert ObjectId → string so downstream code can use it safely
-    user["_id"] = str(user["_id"])
-    return user
 
 
 # --------------------------------------------------------------------------

@@ -42,20 +42,28 @@ def create_access_token(
     return encoded_jwt
 
 
-def decode_access_token(token: str) -> Optional[dict]:
-    """Decode and validate an access token. Returns None on any failure."""
+from jose import jwt, JWTError, ExpiredSignatureError
+
+def decode_access_token(token: str) -> dict:
+    """
+    Decode and validate an access token.
+    Raises ExpiredSignatureError if the token is expired.
+    Raises JWTError for other validation failures.
+    """
     try:
         payload = jwt.decode(
             token, settings.JWT_SECRET, algorithms=[settings.JWT_ALGORITHM]
         )
-        # python-jose already validates expiration; double-check token type
         if payload.get("type") != "access":
             logger.warning("⚠️ Token is not an access token")
-            return None
+            raise JWTError("Invalid token type")
         return payload
+    except ExpiredSignatureError:
+        logger.warning("🕒 Access token has expired")
+        raise
     except JWTError as e:
         logger.warning(f"⚠️ Access token decode failed: {e}")
-        return None
+        raise
 
 
 # --------------------------------------------------------------------------

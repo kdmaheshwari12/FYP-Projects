@@ -48,7 +48,6 @@ async def submit_review(
     Raises:
         422: Validation errors
         404: Itinerary not found
-        400: Cannot review unpublished itinerary or duplicate review
         403: User cannot review their own itinerary
     """
     errors = []
@@ -105,22 +104,12 @@ async def submit_review(
     itinerary = await broker_itineraries_collection.find_one(
         {"_id": itinerary_obj_id}
     )
-    is_broker_itinerary = True
     if not itinerary:
         itinerary = await itineraries_collection.find_one({"_id": itinerary_obj_id})
-        is_broker_itinerary = False
     
     if not itinerary:
         logger.warning(f"Itinerary not found: {itinerary_id}")
         raise HTTPException(status_code=404, detail="Itinerary not found")
-    
-    # ❌ Prevent reviewing unpublished itineraries (only for broker itineraries)
-    if is_broker_itinerary and not itinerary.get("is_published", False):
-        logger.warning(f"Cannot review unpublished itinerary: {itinerary_id}")
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot review an unpublished itinerary"
-        )
     
     # ❌ Prevent broker reviewing their own itinerary
     broker_id_val = itinerary.get("brokerId")

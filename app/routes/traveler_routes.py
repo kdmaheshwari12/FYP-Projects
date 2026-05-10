@@ -19,6 +19,7 @@ import uuid
 from dotenv import load_dotenv
 from app.LLM.main import generate_itinerary_llm
 from app.core.validation import validate_string, ValidationError
+from app.schemas.itinerary_schema import ItineraryRequest
 import logging
 
 logger = logging.getLogger(__name__)
@@ -503,120 +504,162 @@ async def save_preferences(preferences: dict, token: str = Depends(oauth2_scheme
     return {"message": "Preferences saved successfully", "preferences": preferences}
 
 
-# 3️⃣ Generate AI Itinerary   - everytime a traveler generates an itinerary  it gets stored in itinerary collection, 
+# 3️⃣ Generate AI Itinerary
+# Every generated itinerary is stored in the itineraries collection.
+# Validation is handled entirely by the ItineraryRequest Pydantic schema
+# BEFORE any AI/LLM code runs.
 @router.post("/generate-itinerary")
-async def generate_itinerary(preferences: dict, token: str = Depends(oauth2_scheme)):
+async def generate_itinerary(
+    preferences: ItineraryRequest,          # ← strict Pydantic schema
+    token: str = Depends(oauth2_scheme)
+):
+    """
+    Generate a personalized AI itinerary.
 
-    # ------------------------
-    # Auth Validation
-    # ------------------------
+    Required fields (validated by Pydantic before this function runs):
+      - destination        : non-empty string, 2–100 chars
+      - departure_location : non-empty string, 2–100 chars
+      - budget             : positive number > 0  (PKR)
+      - duration_days      : integer 1–30
+      - travel_style       : one of the TravelStyle enum values
+      - interests          : optional list of strings
+
+    Any missing / empty / invalid field returns HTTP 422 with a clear
+    message BEFORE the LLM is called.
+    """
+
+    # ── Auth ──────────────────────────────────────────────────────────────────
     payload = decode_access_token(token)
     if not payload:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     email = payload["sub"]
+    request_id = f"GEN-{uuid.uuid4().hex[:8]}"
+    logger.info(
+        f"[{request_id}] 🤖 generate-itinerary | user={email} "
+        f"dest='{preferences.destination}' days={preferences.duration_days} "
+        f"budget={preferences.budget} style={preferences.travel_style}"
+    )
 
-    # ------------------------
-    # Extract Preferences
-    # ------------------------
-    destination = preferences.get("destination", "Unknown Destination")
-    duration = int(preferences.get("duration", 3))
-    raw_budget = preferences.get("budget", "moderate")
-    # Convert numeric → category
-    if isinstance(raw_budget, (int, float)):
-        if raw_budget < 20000:
-            budget = "low"
-        elif raw_budget < 60000:
-            budget = "moderate"
-        else:
-            budget = "high"
+    # ── Map budget (PKR number → low / moderate / high category) ─────────────
+    raw_budget = preferences.budget
+    if raw_budget < 20_000:
+        budget_category = "low"
+    elif raw_budget < 60_000:
+        budget_category = "moderate"
     else:
-        budget = str(raw_budget).lower()
-    interests = preferences.get("interests", ["Culture", "Adventure"])
+        budget_category = "high"
 
-    # ------------------------
-    # Generate Unique Hash (for duplicate prevention)
-    # ------------------------
+    destination   = preferences.destination       # already stripped by schema
+    duration      = preferences.duration_days
+    interests     = preferences.resolved_interests
+    travel_style  = preferences.travel_style.value
+
+    # ── Duplicate prevention hash ─────────────────────────────────────────────
     hash_input = json.dumps({
-        "user_email": email,
-        "destination": destination.lower(),
-        "duration": duration,
-        "budget": budget,
-        "interests": sorted(interests),
+        "user_email":   email,
+        "destination":  destination.lower(),
+        "duration":     duration,
+        "budget":       budget_category,
+        "interests":    sorted(interests),
+        "travel_style": travel_style,
     }, sort_keys=True)
-
     unique_hash = hashlib.sha256(hash_input.encode()).hexdigest()
 
-    # ------------------------
-    # Check if itinerary already exists
-    # ------------------------
     existing = await itineraries_collection.find_one({"unique_hash": unique_hash})
     if existing:
         _serialize_doc(existing)
+        logger.info(f"[{request_id}] 🔁 Returning cached itinerary")
         return {
+            "success": True,
             "message": "Itinerary already existed — returning saved version.",
             "duplicate": True,
-            "itinerary": existing
+            "itinerary": existing,
         }
 
-    # ------------------------
-    # Call RAG LLM (in thread pool to avoid blocking async event loop)
-    # ------------------------
+    # ── LLM call (runs in thread pool so async loop stays unblocked) ──────────
     import asyncio
     try:
+        logger.info(f"[{request_id}] ⏳ Calling LLM for '{destination}' ({duration} days)...")
         llm_output = await asyncio.to_thread(
             generate_itinerary_llm,
             destination=destination,
             days=duration,
-            budget=budget,
-            interests=interests
+            budget=budget_category,
+            interests=interests,
         )
+    except ValueError as e:
+        # Catch specific ValueErrors (like NO_HOTELS)
+        err_msg = str(e)
+        if "NO_HOTELS" in err_msg:
+            clean_msg = err_msg.split(":", 1)[1].strip() if ":" in err_msg else err_msg
+            logger.warning(f"[{request_id}] ⚠️ {err_msg}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": clean_msg}
+            )
+        raise e # Let global handler take other ValueErrors
+
     except Exception as e:
-        logger.error(f"💥 LLM generation failed: {str(e)}", exc_info=True)
+        err_msg = str(e)
+        logger.error(f"[{request_id}] 💥 LLM generation failed: {err_msg}", exc_info=True)
+        
+        # Decide status code based on error type
+        status_code = 500
+        clean_msg = "AI itinerary generation failed"
+        
+        if "EXTERNAL_SERVICE_UNAVAILABLE" in err_msg:
+            status_code = 503
+            clean_msg = "External travel service unavailable"
+        elif "AI_GENERATION_FAILED" in err_msg:
+            status_code = 500
+            # Try to extract the actual reason if available
+            if ":" in err_msg:
+                clean_msg = err_msg.split(":", 1)[1].strip()
+        else:
+            clean_msg = f"Itinerary generation failed: {err_msg}"
+
         return JSONResponse(
-            status_code=500,
+            status_code=status_code,
             content={
                 "success": False,
-                "message": f"AI itinerary generation failed. Please try again. Error: {str(e)}"
-            }
+                "message": clean_msg,
+            },
         )
 
-    # ------------------------
-    # Prepare Itinerary Object
-    # ------------------------
-    itinerary = {
-        "user_email": email,
-        "destination": destination,
-        "duration": duration,
-        "budget": budget,
-        "interests": interests,
-        "itinerary_days": llm_output,  # ← Now real AI output
-        "created_at": datetime.datetime.now(datetime.timezone.utc),
-        "source": "RAG AI Generator v2.0",
-        "unique_hash": unique_hash,
+    # ── Persist to MongoDB ─────────────────────────────────────────────────────
+    itinerary_doc = {
+        "user_email":         email,
+        "destination":        destination,
+        "departure_location": preferences.departure_location,
+        "duration":           duration,
+        "budget_pkr":         raw_budget,
+        "budget":             budget_category,
+        "interests":          interests,
+        "travel_style":       travel_style,
+        "itinerary_days":     llm_output,
+        "created_at":         datetime.datetime.now(datetime.timezone.utc),
+        "source":             "RAG AI Generator v2.0",
+        "unique_hash":        unique_hash,
     }
 
-    # ------------------------
-    # Save to MongoDB
-    # ------------------------
     try:
-        result = await itineraries_collection.insert_one(itinerary)
-        itinerary["_id"] = str(result.inserted_id)
-        _serialize_doc(itinerary)
+        result = await itineraries_collection.insert_one(itinerary_doc)
+        itinerary_doc["_id"] = str(result.inserted_id)
+        _serialize_doc(itinerary_doc)
+        logger.info(f"[{request_id}] ✅ Itinerary saved: {result.inserted_id}")
     except Exception as e:
-        logger.error(f"💥 Failed to save itinerary: {str(e)}", exc_info=True)
+        logger.error(f"[{request_id}] 💥 Failed to save itinerary: {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"success": False, "message": "Failed to save itinerary"}
+            content={"success": False, "message": "Failed to save itinerary"},
         )
 
-    # ------------------------
-    # Return Response
-    # ------------------------
     return {
+        "success": True,
         "message": "AI itinerary generated successfully!",
         "duplicate": False,
-        "itinerary": itinerary
+        "itinerary": itinerary_doc,
     }
 
 # 4️⃣ View Specific Itinerary

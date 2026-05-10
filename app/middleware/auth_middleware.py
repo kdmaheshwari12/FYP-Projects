@@ -30,6 +30,8 @@ security = HTTPBearer()
 # --------------------------------------------------------------------------
 # Base dependency: extract user from backend JWT
 # --------------------------------------------------------------------------
+from jose import JWTError, ExpiredSignatureError
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ) -> dict:
@@ -37,36 +39,42 @@ async def get_current_user(
     FastAPI dependency: extracts and verifies the backend JWT from the
     Authorization header, then loads the user from MongoDB.
 
-    Raises HTTP 401 if the token is invalid/expired or the user doesn't exist.
+    Raises HTTP 401 with specific detail if the token is expired.
     """
     token = credentials.credentials
 
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    try:
+        payload = decode_access_token(token)
+        email: str = payload.get("sub")
+        if email is None:
+            raise JWTError("Missing 'sub' claim")
+            
+        user = await get_user_by_email(email)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
 
-    payload = decode_access_token(token)
-    if payload is None:
-        logger.warning("⚠️ Backend JWT decode failed or expired")
-        raise credentials_exception
+        # Attach the role from the JWT payload
+        user["_jwt_role"] = payload.get("role", "user")
+        return user
 
-    email: str = payload.get("sub")
-    if email is None:
-        logger.warning("⚠️ Backend JWT missing 'sub' claim")
-        raise credentials_exception
-
-    user = await get_user_by_email(email)
-    if user is None:
-        logger.warning(f"⚠️ User not found for email={email}")
-        raise credentials_exception
-
-    # Attach the role from the JWT payload (in case DB is slightly behind)
-    user["_jwt_role"] = payload.get("role", "user")
-
-    logger.debug(f"🔓 Authenticated user: {user.get('email')} (role={user.get('role')})")
-    return user
+    except ExpiredSignatureError:
+        logger.warning("⚠️ Token expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except JWTError as e:
+        logger.warning(f"⚠️ Token invalid: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 
 # --------------------------------------------------------------------------
@@ -117,3 +125,4 @@ def require_role(*allowed_roles: str):
 # Convenience shortcuts
 require_admin = require_role("admin")
 require_broker = require_role("broker", "admin")
+require_traveler = require_role("traveler", "admin")

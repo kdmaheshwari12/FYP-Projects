@@ -88,25 +88,51 @@ app = FastAPI(
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """
-    Catch Pydantic validation errors (422) and return them as uniform 400 JSON.
+    Catch Pydantic validation errors and return formatted 422 JSON.
+    
+    Response format (requested):
+    {
+      "success": false,
+      "message": "Validation failed",
+      "errors": [
+        { "field": "destination", "message": "Destination is required" },
+        { "field": "travel_style", "message": "Invalid travel style" }
+      ]
+    }
     """
     error_details = exc.errors()
-    # Create a user-friendly message from the first error
-    msg = "Invalid input data"
-    if error_details:
-        first_error = error_details[0]
-        field = ".".join(str(loc) for loc in first_error.get("loc", []))
-        msg = f"Error in field '{field}': {first_error.get('msg')}"
+    formatted_errors = []
 
-    logger.warning(f"🛡️ Global Validation Error: {msg}")
-    
+    for err in error_details:
+        loc = err.get("loc", [])
+        # 'loc' for body fields is usually ('body', 'field_name')
+        field = str(loc[-1]) if loc else "unknown"
+        
+        raw_msg: str = err.get("msg", "")
+
+        # Pydantic v2 prefixes custom ValueError messages with "Value error, "
+        # We strip this so only the core message remains.
+        if raw_msg.lower().startswith("value error, "):
+            raw_msg = raw_msg[len("value error, "):]
+        
+        # Normalize Enum errors (like travel_style) to "Invalid <field>"
+        if "enum" in err.get("type", "") or "enum" in raw_msg.lower():
+            raw_msg = f"Invalid {field.replace('_', ' ')}"
+
+        formatted_errors.append({
+            "field": field,
+            "message": raw_msg
+        })
+
+    logger.warning(f"🛡️ Validation failed on {request.url.path}: {formatted_errors}")
+
     return JSONResponse(
-        status_code=status.HTTP_400_BAD_REQUEST,
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
             "success": False,
-            "message": msg,
-            "errors": error_details
-        }
+            "message": "Validation failed",
+            "errors": formatted_errors,
+        },
     )
 
 @app.exception_handler(Exception)

@@ -7,11 +7,8 @@ import uuid
 from app.core.config import settings
 from app.db.mongodb import trips_collection, itineraries_collection, broker_itineraries_collection
 from app.routes.auth_routes import get_current_user_obj
+from app.schemas.trip_schema import TripCreate
 from app.core.validation import (
-    validate_choice,
-    validate_string,
-    validate_integer,
-    ValidationError,
     ValidationErrorResponse,
 )
 
@@ -22,117 +19,63 @@ logger = logging.getLogger(__name__)
 # ============================================================
 # 1️⃣ CREATE TRIP (REUSE SAFE)
 # ============================================================
-@router.post("/")
+@router.post("/", status_code=201)
 async def create_trip(
-    data: dict,
+    trip_data: TripCreate,
     current_user: dict = Depends(get_current_user_obj)
 ):
     """
     Create or reuse a trip with validation.
     """
-    # Generate a unique request ID for tracing
     request_id = f"TRIP-{uuid.uuid4().hex[:8]}"
     logger.info(f"[{request_id}] 🆕 CREATE_TRIP attempt | User: {current_user.get('email')}")
     
     try:
-        errors = []
-        
-        # ========== ITINERARY ID VALIDATION ==========
-        itinerary_id = data.get("itinerary_id")
-        if not itinerary_id:
-            logger.warning(f"[{request_id}] ❌ Missing itinerary_id")
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "itinerary_id is required"}
-            )
-        
-        try:
-            itinerary_obj_id = ObjectId(itinerary_id)
-        except Exception:
-            logger.warning(f"[{request_id}] ❌ Invalid itinerary_id format: {itinerary_id}")
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Invalid itinerary_id format"}
-            )
-
-        # ========== TRIP TYPE VALIDATION ==========
-        try:
-            trip_type = validate_choice(
-                data.get("trip_type"),
-                ["ai", "broker", "ai_self", "ai_broker"],
-                "trip_type"
-            )
-            logger.debug(f"[{request_id}] Trip type validated: {trip_type}")
-        except ValidationError as e:
-            errors.append(e)
-
-        # ========== DESTINATION VALIDATION ==========
-        destination = data.get("destination")
-        if destination:
+        # Check if we should reuse an existing trip (only if itinerary_id is provided)
+        itinerary_obj_id = None
+        if trip_data.itinerary_id:
             try:
-                destination = validate_string(destination, "destination", allow_empty=False, min_length=2, max_length=100)
-            except ValidationError as e:
-                errors.append(e)
-
-        # ========== BUDGET VALIDATION ==========
-        raw_budget = data.get("budget")
-        budget = 0
-        if raw_budget:
-            try:
-                # If numeric string or int, convert
-                budget = int(float(str(raw_budget)))
-            except (ValueError, TypeError):
-                # If it's a category string like 'moderate', just store 0 for now
-                logger.debug(f"[{request_id}] Budget is categorical: {raw_budget}")
-                budget = 0
-
-        # ========== BROKER ID VALIDATION ==========
-        broker_id = data.get("broker_id")
-        broker_obj_id = None
-        if broker_id:
-            try:
-                broker_obj_id = ObjectId(broker_id)
+                itinerary_obj_id = ObjectId(trip_data.itinerary_id)
             except Exception:
-                errors.append(ValidationError("broker_id", "Invalid broker_id format"))
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": "Invalid itinerary_id format"}
+                )
 
-        # Return validation errors
-        if errors:
-            logger.warning(f"[{request_id}] ❌ Validation failed: {len(errors)} errors")
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "Validation failed",
-                    "errors": [str(e) for e in errors]
+            # Re-use logic: Check if user already has a trip for this itinerary
+            existing_trip = await trips_collection.find_one({
+                "user_id": ObjectId(current_user["_id"]),
+                "itinerary_source_id": itinerary_obj_id,
+                "trip_type": trip_data.trip_type,
+            })
+
+            if existing_trip:
+                logger.info(f"[{request_id}] 🔁 Trip reused: {existing_trip['_id']}")
+                return {
+                    "success": True,
+                    "message": "Trip details retrieved",
+                    "trip_id": str(existing_trip["_id"]),
+                    "reused": True,
+                    "status": existing_trip.get("status", "draft")
                 }
-            )
 
-        # ========== CHECK EXISTING TRIP ==========
-        existing_trip = await trips_collection.find_one({
-            "user_id": ObjectId(current_user["_id"]),
-            "itinerary_source_id": itinerary_obj_id,
-            "trip_type": trip_type,
-        })
+        # Create new trip document
+        # Convert date to datetime for MongoDB
+        start_dt = datetime.combine(trip_data.start_date, datetime.min.time())
+        end_dt = datetime.combine(trip_data.end_date, datetime.min.time())
 
-        if existing_trip:
-            logger.info(f"[{request_id}] 🔁 Trip reused: {existing_trip['_id']}")
-            return {
-                "success": True,
-                "message": "Trip details retrieved",
-                "trip_id": str(existing_trip["_id"]),
-                "reused": True,
-                "status": existing_trip.get("status", "draft")
-            }
-
-        # ========== CREATE NEW TRIP ==========
         trip_doc = {
             "user_id": ObjectId(current_user["_id"]),
-            "trip_type": trip_type,
+            "trip_type": trip_data.trip_type,
             "itinerary_source_id": itinerary_obj_id,
-            "broker_id": broker_obj_id,
-            "status": "chatting" if broker_obj_id else "draft",
-            "destination": destination or "Pakistan",
-            "budget": budget or 0,
+            "broker_id": ObjectId(trip_data.broker_id) if trip_data.broker_id else None,
+            "status": "chatting" if trip_data.broker_id else "draft",
+            "destination": trip_data.destination,
+            "departure_location": trip_data.departure_location,
+            "start_date": start_dt,
+            "end_date": end_dt,
+            "budget": trip_data.budget,
+            "travel_style": trip_data.travel_style.value,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow()
         }
@@ -148,14 +91,14 @@ async def create_trip(
             "status": trip_doc["status"]
         }
 
-    except ValidationError as e:
-        logger.warning(f"[{request_id}] ❌ Validation error: {e.message}")
+    except Exception as e:
+        logger.error(f"[{request_id}] 💥 CRITICAL ERROR: {str(e)}", exc_info=True)
         return JSONResponse(
-            status_code=400,
+            status_code=500,
             content={
                 "success": False,
-                "message": e.message,
-                "field": e.field
+                "message": "A critical server error occurred while creating your trip.",
+                "debug_info": str(e) if settings.DEBUG else None
             }
         )
     except Exception as e:
@@ -401,9 +344,9 @@ async def activate_trip(
     trip_id: str,
     current_user: dict = Depends(get_current_user_obj),
 ):
-    print("🔵 Activate trip called")
-    print("trip_id:", trip_id)
-    print("current_user:", current_user)
+    # Generate a unique request ID for tracing
+    request_id = f"TRIP-{uuid.uuid4().hex[:8]}"
+    logger.info(f"[{request_id}] 🆕 ACTIVATE_TRIP attempt | Trip: {trip_id} | User: {current_user.get('email')}")
 
     # 1️⃣ Validate trip ID
     try:
@@ -418,16 +361,35 @@ async def activate_trip(
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
 
-    # 3️⃣ Ensure caller is TRAVELER
-    try:
-        current_user_id = ObjectId(current_user["_id"])
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid user id")
+    # 3️⃣ Ensure caller is Traveler or Broker
+    current_user_id = str(current_user.get("_id"))
+    role = str(current_user.get("role", "")).lower()
 
-    if trip["user_id"] != current_user_id:
+    print(f"DEBUG: Current user role: {role}")
+    print(f"DEBUG: Current user ID: {current_user_id}")
+    print(f"DEBUG: Trip traveler ID: {str(trip.get('user_id'))}")
+    print(f"DEBUG: Trip broker ID: {str(trip.get('broker_id'))}")
+
+    # ROLE GATE
+    if role not in ["traveler", "broker"]:
         raise HTTPException(
             status_code=403,
-            detail="Only traveler can activate the trip"
+            detail="Only traveler or broker can activate the trip"
+        )
+
+    # OWNERSHIP GATE
+    is_traveler = str(trip.get("user_id")) == current_user_id
+    assigned_broker_id = trip.get("broker_id")
+    is_assigned_broker = assigned_broker_id and str(assigned_broker_id) == current_user_id
+    
+    # Option 1 logic: Allow any broker if no broker is assigned yet
+    can_pick_up = (role == "broker" and assigned_broker_id is None)
+
+    if not (is_traveler or is_assigned_broker or can_pick_up):
+        logger.warning(f"Unauthorized activation attempt: User {current_user_id} (role: {role}) for Trip {trip_id}")
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorized to activate this trip"
         )
 
     # 4️⃣ Ensure correct state
@@ -450,10 +412,11 @@ async def activate_trip(
         )
 
     if not itinerary:
-        raise HTTPException(status_code=404, detail="Itinerary not found")
-
-    # supports both structures (AI: duration, Broker: days)
-    days = itinerary.get("duration") or itinerary.get("duration_days") or 1
+        # Fallback if itinerary is missing (since we made it optional during trip creation)
+        days = 3
+    else:
+        # supports both structures (AI: duration, Broker: days)
+        days = itinerary.get("duration") or itinerary.get("duration_days") or 1
 
     # ============================================================
     # 🔹 6️⃣ Calculate dates
@@ -465,22 +428,29 @@ async def activate_trip(
     # ============================================================
     # 🔹 7️⃣ Update trip (FULL STATE INIT)
     # ============================================================
+    update_data = {
+        "status": "active",
+        "start_date": start_date,
+        "end_date": end_date,
+        "grace_end_date": grace_end_date,
+
+        # 🔥 Completion system fields
+        "traveler_completed": False,
+        "broker_completed": False,
+        "completion_requested_at": None,
+        "completed_at": None,
+
+        "updated_at": datetime.utcnow()
+    }
+
+    # If a broker is taking an unassigned trip, assign them now
+    if role == "broker" and assigned_broker_id is None:
+        logger.info(f"[{request_id}] 🤝 Broker {current_user_id} picking up trip {trip_id}")
+        update_data["broker_id"] = ObjectId(current_user_id)
+
     await trips_collection.update_one(
         {"_id": trip_obj_id},
-        {"$set": {
-            "status": "active",
-            "start_date": start_date,
-            "end_date": end_date,
-            "grace_end_date": grace_end_date,
-
-            # 🔥 Completion system fields
-            "traveler_completed": False,
-            "broker_completed": False,
-            "completion_requested_at": None,
-            "completed_at": None,
-
-            "updated_at": datetime.utcnow()
-        }}
+        {"$set": update_data}
     )
 
     # 8️⃣ Fetch updated trip

@@ -130,6 +130,28 @@ def load_cities():
 PAKISTAN_CITIES = load_cities()
 CITY_RE = re.compile(r"\b(" + "|".join(re.escape(c) for c in PAKISTAN_CITIES) + r")\b", re.IGNORECASE)
 
+# ── Destination Alias Map ─────────────────────────────────────────────────────
+DESTINATION_ALIASES: Dict[str, str] = {
+    "hunza valley":       "hunza",
+    "hunza-valley":       "hunza",
+    "gilgit baltistan":   "gilgit",
+    "gilgit-baltistan":   "gilgit",
+    "azad kashmir":       "kashmir",
+    "azad jammu kashmir": "kashmir",
+    "swat valley":        "swat",
+    "naran kaghan":       "naran",
+    "murree hills":       "murree",
+}
+
+def normalize_destination(dest: str) -> str:
+    key = dest.strip().lower()
+    if key in DESTINATION_ALIASES:
+        return DESTINATION_ALIASES[key]
+    for alias, canonical in DESTINATION_ALIASES.items():
+        if alias in key:
+            return canonical
+    return dest
+
 # ── Rate Limiter ──────────────────────────────────────────────────────────────
 class RateLimiter:
     def __init__(self, rate=10, per=60):
@@ -233,11 +255,7 @@ def normalize_place_name(name):
 # ============================================================================
 # TIMING LOGIC
 # ============================================================================
-
-_ALLDAY_NORM = {
-    "all-day","all day","allday","all_day",
-    "fullday","full day","full-day",
-}
+_ALLDAY_NORM = {"all-day","all day","allday","all_day","fullday","full day","full-day"}
 
 def normalize_timing_for_filtering(raw):
     if not raw or str(raw).strip().lower() in ("nan","none","","not specified"):
@@ -247,36 +265,25 @@ def normalize_timing_for_filtering(raw):
     if clean in _ALLDAY_NORM or key in _ALLDAY_NORM:
         return ["all-day"]
     MAP = {
-        "breakfast":         ["breakfast"],
-        "breakfast brunch":  ["brunch"],
-        "brunch":            ["brunch"],
-        "brunch meals":      ["brunch"],
-        "lunch":             ["lunch"],
-        "dinner":            ["dinner"],
-        "dinner snacks":     ["dinner"],
-        "dinner late":       ["dinner"],
-        "mainmeals":         ["mainmeals"],
-        "main meals":        ["mainmeals"],
-        "meals":             ["meals"],
-        "dessert":           ["meals"],
-        "morning":           ["morning"],
-        "afternoon":         ["afternoon"],
-        "evening":           ["evening"],
-        "night":             ["night"],
+        "breakfast": ["breakfast"], "breakfast brunch": ["brunch"], "brunch": ["brunch"],
+        "brunch meals": ["brunch"], "lunch": ["lunch"], "dinner": ["dinner"],
+        "dinner snacks": ["dinner"], "dinner late": ["dinner"], "mainmeals": ["mainmeals"],
+        "main meals": ["mainmeals"], "meals": ["meals"], "dessert": ["meals"],
+        "morning": ["morning"], "afternoon": ["afternoon"], "evening": ["evening"], "night": ["night"],
     }
     if clean in MAP: return MAP[clean]
-    if key   in MAP: return MAP[key]
+    if key in MAP: return MAP[key]
     if "breakfast" in key and "lunch" in key: return ["brunch"]
     if "breakfast" in key: return ["breakfast"]
-    if "brunch"    in key: return ["brunch"]
-    if "mainmeal"  in key or "main meal" in key: return ["mainmeals"]
-    if "lunch"     in key: return ["lunch"]
-    if "dinner"    in key: return ["dinner"]
-    if "meal"      in key: return ["meals"]
-    if "morning"   in key: return ["morning"]
+    if "brunch" in key: return ["brunch"]
+    if "mainmeal" in key or "main meal" in key: return ["mainmeals"]
+    if "lunch" in key: return ["lunch"]
+    if "dinner" in key: return ["dinner"]
+    if "meal" in key: return ["meals"]
+    if "morning" in key: return ["morning"]
     if "afternoon" in key: return ["afternoon"]
-    if "evening"   in key: return ["evening"]
-    if "night"     in key: return ["night"]
+    if "evening" in key: return ["evening"]
+    if "night" in key: return ["night"]
     return ["all-day"]
 
 def get_timing_display(raw):
@@ -300,16 +307,13 @@ def matches_timing(place_timing: List[str], required_timing: str) -> bool:
 # ============================================================================
 # RETRIEVE & FILTER
 # ============================================================================
-
 def retrieve_and_filter_places(intent, k_per_query=100):
     MAX_DOCS  = 600
     dest      = intent.get("destination_city")
     bud_pref  = intent.get("budget_preference")
     queries   = build_search_queries(intent)
-
     all_docs, seen_ids, seen_norm = [], set(), set()
     print("Searching database...")
-
     for q in queries:
         if len(all_docs) >= MAX_DOCS: break
         try:
@@ -321,12 +325,8 @@ def retrieve_and_filter_places(intent, k_per_query=100):
                 if nn in seen_norm or did in seen_ids: continue
                 all_docs.append(doc); seen_ids.add(did); seen_norm.add(nn)
         except Exception as e: logger.warning(f"Search: {e}")
-
-    print(f"   Raw docs: {len(all_docs)}")
-
     hotels, restaurants, attractions = [], [], []
     used_names, used_norm_set = set(), set()
-
     for doc in all_docs:
         meta   = doc.metadata
         name   = meta.get("Places_name","").strip()
@@ -335,77 +335,33 @@ def retrieve_and_filter_places(intent, k_per_query=100):
         ref    = meta.get("Places_reference","").strip()
         budget = meta.get("Budget","")
         timing_raw = meta.get("timing") or meta.get("Timings") or "All-day"
-
         if not name or not city: continue
         nn = normalize_place_name(name)
         if nn in used_norm_set or name in used_names: continue
         if dest and city.lower().strip() != dest.lower().strip(): continue
-
         bcat = normalize_budget_category(budget)
         if bud_pref and bcat != "unspecified":
             order = {"low":0,"moderate":1,"high":2}
             mp = "moderate" if bud_pref=="medium" else bud_pref
             if mp in order and bcat in order:
                 if abs(order[mp]-order[bcat]) > 1: continue
-
         used_names.add(name); used_norm_set.add(nn)
         link = ref or f"https://www.google.com/maps/search/{name.replace(' ','+' )}+{city.replace(' ','+')}"
-
-        timing_display = get_timing_display(timing_raw)
-        timing_tags    = normalize_timing_for_filtering(timing_raw)
-
         entry = dict(name=name, type=ptype, city=city, link=link,
                      budget=budget, budget_category=bcat,
-                     timing=timing_tags,
-                     timing_display=timing_display,
+                     timing=normalize_timing_for_filtering(timing_raw),
+                     timing_display=get_timing_display(timing_raw),
                      normalized_name=nn)
-
         cat = categorize_place_type(ptype)
-        if cat == "hotel":
-            hotels.append(entry)
-        elif cat == "restaurant":
-            restaurants.append(entry)
-        else:
-            attractions.append(entry)
-
-    random.shuffle(hotels)
-    random.shuffle(restaurants)
-    random.shuffle(attractions)
-
-    print(f"   Hotels:{len(hotels)} | Restaurants:{len(restaurants)} | Attractions:{len(attractions)}")
-
-    r_dist: Dict[str,int] = {}
-    for r in restaurants:
-        td = r["timing_display"]
-        r_dist[td] = r_dist.get(td,0)+1
-    a_dist: Dict[str,int] = {}
-    for a in attractions:
-        td = a["timing_display"]
-        a_dist[td] = a_dist.get(td,0)+1
-
-    br=[r for r in restaurants if matches_timing(r["timing"],"breakfast")]
-    lr=[r for r in restaurants if matches_timing(r["timing"],"lunch")]
-    dr=[r for r in restaurants if matches_timing(r["timing"],"dinner")]
-    ma=[a for a in attractions  if matches_timing(a["timing"],"morning")]
-    aa=[a for a in attractions  if matches_timing(a["timing"],"afternoon")]
-    ea=[a for a in attractions  if matches_timing(a["timing"],"evening")]
-    na=[a for a in attractions  if matches_timing(a["timing"],"night")]
-
-    print(f"\n   RESTAURANTS (by CSV timing):")
-    for t,c in sorted(r_dist.items(),key=lambda x:x[1],reverse=True)[:12]:
-        print(f"      {t!r}: {c}")
-    print(f"   Breakfast:{len(br)} Lunch:{len(lr)} Dinner:{len(dr)}")
-    print(f"\n   ATTRACTIONS (by CSV timing):")
-    for t,c in sorted(a_dist.items(),key=lambda x:x[1],reverse=True)[:12]:
-        print(f"      {t!r}: {c}")
-    print(f"   Morning:{len(ma)} Afternoon:{len(aa)} Evening:{len(ea)} Night:{len(na)}\n")
-
+        if cat == "hotel": hotels.append(entry)
+        elif cat == "restaurant": restaurants.append(entry)
+        else: attractions.append(entry)
+    random.shuffle(hotels); random.shuffle(restaurants); random.shuffle(attractions)
     return hotels, restaurants, attractions
 
 # ============================================================================
-# SMART FREE TIME
+# CONTEXT & PROMPT
 # ============================================================================
-
 def get_places_for_slot(places, required_timing, global_used, limit):
     result = []
     for p in places:
@@ -415,594 +371,132 @@ def get_places_for_slot(places, required_timing, global_used, limit):
         if len(result) >= limit: break
     return result
 
-# ============================================================================
-# CONTEXT FORMATTING
-# ============================================================================
-
 def format_context(intent, hotels, restaurants, attractions):
     dest = intent.get("destination_city","Pakistan")
     dur  = intent.get("duration",3)
     global_used: Set[str] = set()
-
     ctx  = f"=== {dest.upper()} | {dur} DAYS ===\n\n"
-
     ctx += "HOTELS (choose exactly ONE):\n"
     for i,h in enumerate(hotels[:8],1):
         e = get_budget_emoji(h["budget_category"])
-        ctx += (f"H{i}. {h['name']} | {h['type']} | {h['link']} "
-                f"| ({e} {h['budget_category'].upper()}) | ⏰ {h['timing_display']} ⏰\n")
+        ctx += f"H{i}. {h['name']} | {h['type']} | {h['link']} | ({e} {h['budget_category'].upper()}) | ⏰ {h['timing_display']} ⏰\n"
     if not hotels: ctx += "  None available\n"
     ctx += "\n"
-
     def slot_section(label, slot_key, pool, per_day):
         needed = dur * per_day + 5
         cands  = get_places_for_slot(pool, slot_key, global_used, needed)
-        for p in cands:
-            global_used.add(p["normalized_name"])
+        for p in cands: global_used.add(p["normalized_name"])
         lines = f"{label}\n"
         if cands:
             for i, p in enumerate(cands, 1):
                 e = get_budget_emoji(p["budget_category"])
-                lines += (f"  {i}. {p['name']} | {p['type']} | {p['link']} "
-                          f"| ({e} {p['budget_category'].upper()}) | ⏰ {p['timing_display']} ⏰\n")
-            lines += f"  ── Total: {len(cands)} places available\n"
-        else:
-            lines += "  NONE — use FREE TIME for every slot in this list\n"
-        lines += "\n"
-        return lines, len(cands)
-
-    ctx += "=" * 65 + "\n"
-    ctx += "RESTAURANTS — use ONLY from correct slot list\n"
-    ctx += "  NOTE: All-day / FullDay places valid for any meal\n"
-    ctx += "  NOTE: Brunch valid for breakfast OR lunch\n"
-    ctx += "  NOTE: MainMeals valid for lunch OR dinner\n"
-    ctx += "  NOTE: Meals valid for breakfast OR dinner\n"
-    ctx += "=" * 65 + "\n\n"
-
-    s, br_n = slot_section("BREAKFAST LIST (9:30 AM):", "breakfast", restaurants, 1)
-    ctx += s
-    s, lr_n = slot_section("LUNCH LIST (2:00 PM):", "lunch", restaurants, 1)
-    ctx += s
-    s, dr_n = slot_section("DINNER LIST (8:30 PM):", "dinner", restaurants, 1)
-    ctx += s
-
-    ctx += "=" * 65 + "\n"
-    ctx += "ATTRACTIONS — use ONLY from correct slot list\n"
-    ctx += "  NOTE: All-day / FullDay places valid for any time slot\n"
-    ctx += "=" * 65 + "\n\n"
-
-    s, ma_n = slot_section("MORNING LIST (10AM-1PM):", "morning", attractions, 4)
-    ctx += s
-    s, aa_n = slot_section("AFTERNOON LIST (3PM-6PM):", "afternoon", attractions, 4)
-    ctx += s
-    s, ea_n = slot_section("EVENING LIST (7:30PM):", "evening", attractions, 1)
-    ctx += s
-    s, na_n = slot_section("NIGHT LIST (9:30PM+):", "night", attractions, 1)
-    ctx += s
-
-    ctx += "=" * 65 + "\n"
-    ctx += f"AVAILABLE COUNTS:\n"
-    ctx += f"  Breakfast:{br_n} | Lunch:{lr_n} | Dinner:{dr_n}\n"
-    ctx += f"  Morning:{ma_n} | Afternoon:{aa_n} | Evening:{ea_n} | Night:{na_n}\n"
-    ctx += "\n"
-
-    morning_need   = dur * 2
-    afternoon_need = dur * 4
-    evening_need   = dur * 2
-    night_need     = dur * 1
-    br_need        = dur * 1
-    lr_need        = dur * 1
-    dr_need        = dur * 1
-
-    ma_ft  = max(0, morning_need   - ma_n)
-    aa_ft  = max(0, afternoon_need - aa_n)
-    ea_ft  = max(0, evening_need   - ea_n)
-    na_ft  = max(0, night_need     - na_n)
-    br_ft  = max(0, br_need        - br_n)
-    lr_ft  = max(0, lr_need        - lr_n)
-    dr_ft  = max(0, dr_need        - dr_n)
-
-    ctx += "FREE TIME TRACKING:\n"
-    ctx += f"  Slots needed  — Morning:{morning_need} Afternoon:{afternoon_need} Evening:{evening_need} Night:{night_need}\n"
-    ctx += f"  Slots needed  — Breakfast:{br_need} Lunch:{lr_need} Dinner:{dr_need}\n"
-    ctx += f"  Available     — Morning:{ma_n} Afternoon:{aa_n} Evening:{ea_n} Night:{na_n}\n"
-    ctx += f"  Available     — Breakfast:{br_n} Lunch:{lr_n} Dinner:{dr_n}\n"
-    ctx += f"  FREE TIME needed — Morning:{ma_ft} Afternoon:{aa_ft} Evening:{ea_ft} Night:{na_ft}\n"
-    ctx += f"  FREE TIME needed — Breakfast:{br_ft} Lunch:{lr_ft} Dinner:{dr_ft}\n"
-    ctx += "\n"
-    ctx += "FREE TIME RULES:\n"
-    ctx += "  1. NEVER repeat a place — each place used EXACTLY ONCE.\n"
-    ctx += "  2. Work through each list IN ORDER, top to bottom, one per slot.\n"
-    ctx += "  3. When a list runs out mid-itinerary, switch to FREE TIME for that slot.\n"
-    ctx += "  4. FREE TIME format: **TIME** – 🕐 FREE TIME: Explore or relax nearby\n"
-    ctx += "  5. Meals: if Breakfast/Lunch/Dinner list exhausted, write FREE TIME for that meal.\n"
-    ctx += "=" * 65 + "\n\n"
-
+                lines += f"  {i}. {p['name']} | {p['type']} | {p['link']} | ({e} {p['budget_category'].upper()}) | ⏰ {p['timing_display']} ⏰\n"
+        else: lines += "  NONE — use FREE TIME\n"
+        return lines + "\n"
+    ctx += slot_section("BREAKFAST LIST:", "breakfast", restaurants, 1)
+    ctx += slot_section("LUNCH LIST:", "lunch", restaurants, 1)
+    ctx += slot_section("DINNER LIST:", "dinner", restaurants, 1)
+    ctx += slot_section("MORNING LIST:", "morning", attractions, 4)
+    ctx += slot_section("AFTERNOON LIST:", "afternoon", attractions, 4)
+    ctx += slot_section("EVENING LIST:", "evening", attractions, 1)
+    ctx += slot_section("NIGHT LIST:", "night", attractions, 1)
     return ctx
 
-# ── Prompt ────────────────────────────────────────────────────────────────────
-PROMPT_TEMPLATE = """You are a Pakistan Travel Itinerary AI v4.1.
-
-═══════════════════════════════════════════════════════════════════
-RULE 1 — ZERO DUPLICATES (MOST IMPORTANT RULE)
-═══════════════════════════════════════════════════════════════════
-Every place in this itinerary must appear EXACTLY ONCE.
-Before writing each slot, mentally check: "Have I used this place before?"
-If YES → skip it, take the NEXT place from the list.
-If the list is fully exhausted → write FREE TIME for that slot.
-NEVER repeat a place under any circumstances.
-
-═══════════════════════════════════════════════════════════════════
-RULE 2 — USE LISTS IN ORDER, ONE PER SLOT
-═══════════════════════════════════════════════════════════════════
-Each list is numbered. Consume them top-to-bottom, one per time slot.
-  Day 1 breakfast → use item 1 from BREAKFAST LIST
-  Day 2 breakfast → use item 2 from BREAKFAST LIST
-  Day 3 breakfast → use item 3 from BREAKFAST LIST
-  Day 4 breakfast → list has only 3 items → FREE TIME
-
-Same rule for ALL lists (Lunch, Dinner, Morning, Afternoon, Evening, Night).
-
-═══════════════════════════════════════════════════════════════════
-RULE 3 — FREE TIME WHEN LIST EXHAUSTED
-═══════════════════════════════════════════════════════════════════
-The DATA section shows "FREE TIME needed" counts per slot.
-When a slot's list runs out, write:
-  **TIME** – 🕐 FREE TIME: Explore or relax nearby
-
-For meals (breakfast/lunch/dinner) when list is exhausted:
-  **TIME** – 🕐 FREE TIME: Grab a meal at a local spot nearby
-
-═══════════════════════════════════════════════════════════════════
-RULE 4 — TIMING TAG
-═══════════════════════════════════════════════════════════════════
-Copy the ⏰ value EXACTLY as written in the data entry.
-Do NOT change it. Do NOT invent it.
-
-═══════════════════════════════════════════════════════════════════
-RULE 5 — ONE HOTEL, APPEARS EXACTLY TWICE
-═══════════════════════════════════════════════════════════════════
-Check-in: Day 1 at 9:00 AM
-Check-out: Last day at 6:00 PM
-The hotel is the ONLY place allowed to appear twice.
-
-════════════════════════════════════════════════════════
-EXACT TIME SCHEDULE — FOLLOW PRECISELY EVERY DAY
-════════════════════════════════════════════════════════
-
-DAY 1 Karachi (14 entries):
-1.  **9:00 AM**  – 🏨 Check-in at [Hotel](link) - Type (BUDGET) ⏰ Tag ⏰
-2.  **9:30 AM**  – 🍽️ Breakfast at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-3.  **10:00 AM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← MORNING LIST item 1
-4.  **11:00 AM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← MORNING LIST item 2
-5.  **12:00 PM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST item 1
-6.  **1:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST item 2
-7.  **2:00 PM**  – 🍽️ Lunch at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-8.  **3:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST item 3
-9.  **4:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST item 4
-10. **5:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← EVENING LIST item 1
-11. **6:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← EVENING LIST item 2
-12. **7:30 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← NIGHT LIST item 1
-13. **8:30 PM**  – 🍽️ Dinner at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-14. **9:30 PM**  – 🏨 Rest at Hotel
-
-MIDDLE DAYS — Day 2 Lahore (13 entries):
-1.  **9:30 AM**  – 🍽️ Breakfast at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-2.  **10:00 AM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← MORNING LIST next item
-3.  **11:00 AM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← MORNING LIST next item
-4.  **12:00 PM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-5.  **1:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-6.  **2:00 PM**  – 🍽️ Lunch at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-7.  **3:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-8.  **4:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-9.  **5:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← EVENING LIST next item
-10. **6:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← EVENING LIST next item
-11. **7:30 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← NIGHT LIST next item
-12. **8:30 PM**  – 🍽️ Dinner at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-13. **9:30 PM**  – 🏨 Rest at Hotel
-
-LAST DAY Multan (10 entries):
-1.  **9:30 AM**  – 🍽️ Breakfast at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-2.  **10:00 AM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← MORNING LIST next item
-3.  **11:00 AM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← MORNING LIST next item
-4.  **12:00 PM** – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-5.  **2:00 PM**  – 🍽️ Lunch at [Name](link) - Type (BUDGET) ⏰ Tag ⏰
-6.  **3:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-7.  **4:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-8.  **5:00 PM**  – 📍 Visit [Name](link) - Type (BUDGET) ⏰ Tag ⏰    ← AFTERNOON LIST next item
-9.  **6:00 PM**  – 🏨 Check-out from [Hotel](link) - Type (BUDGET) ⏰ Tag ⏰
-10. **6:30 PM**  – 🚗 Departure
-
-════════════════════════════════════════════════════════
-FORMAT RULES
-════════════════════════════════════════════════════════
-  Header:     ### Day 1
-  Numbers:    1. 2. 3. 4. (not bullets)
-  Time:       **9:00 AM** (always bold, always with AM/PM)
-  Separator:  – (em dash, not hyphen)
-  Link:       [Place Name](url)
-  After link: - Type (💳 MODERATE) ⏰ ExactTag ⏰
-  Rest line:  **9:30 PM** – 🏨 Rest at Hotel           ← no link, no tag
-  Departure:  **6:30 PM** – 🚗 Departure               ← no link, no tag
-  Budget:     💵 LOW  💳 MODERATE  💎 HIGH  💰 UNSPECIFIED
-
-════════════════════════════════════════════════════════
-
+PROMPT_TEMPLATE = """You are a Pakistan Travel Itinerary AI.
+Rule: Zero Duplicates. Use lists in order. If list exhausted, use FREE TIME.
+Format:
+### Day 1
+1. **9:00 AM** – 🏨 Check-in at [Hotel](link) - Type (MODERATE) ⏰ Tag ⏰
+...
 DATA:
 {context}
-
 QUERY: {question}
+Generate {duration} days."""
 
-Generate a complete {duration}-day itinerary.
-- Work through each list IN ORDER, one item per slot, per day.
-- NEVER use a place twice — hotel is the only exception (check-in + check-out).
-- When a list runs out → FREE TIME for remaining slots of that type.
-- Copy every ⏰ tag EXACTLY as it appears in the data entry."""
-
-# ── Analysis ──────────────────────────────────────────────────────────────────
+# ============================================================================
+# ANALYSIS & RETRY
+# ============================================================================
 def analyze_itinerary(content, intent, hotels, restaurants, attractions):
-    links  = re.findall(r"\[([^\]]+)\]\([^)]+\)", content)
-    cin    = set(re.findall(r"Check-in at \[([^\]]+)\]", content))
-    cout   = set(re.findall(r"Check-out from \[([^\]]+)\]", content))
-    hp     = cin & cout
-    cnts   = Counter(links)
-    dups   = {n:c for n,c in cnts.items() if c>1 and n not in hp}
-    dur    = intent.get("duration",3)
-    days   = len(set(re.findall(r"### Day (\d+)", content)))
-    br     = content.count("Breakfast")
-    lu     = content.count("Lunch")
-    di     = content.count("Dinner")
-    ft     = content.count("FREE TIME")
-    ti     = content.count("⏰")
-    s  = min(25, len(links)/max(dur*10,1)*25)
-    s += days/max(dur,1)*20
-    s += min(20,(br+lu+di)/max(dur*3,1)*20)
-    s += 20 if not dups else max(0,20-len(dups)*4)
-    s += 5  if hp else 0
-    s += 10 if ti>=max(len(links)//2,1) else 5
-    s -= max(0, (ft - 0) * 2)
-    return dict(links=len(links),days=days,exp=dur,br=br,lu=lu,di=di,
-                dups=dups,dup_n=len(dups),hp=hp,ft=ft,ti=ti,score=min(100,max(0,int(s))))
-
-def print_quality_report(a):
-    print("\n" + "="*70)
-    print("QUALITY REPORT v4.1")
-    print("="*70)
-    for h in a["hp"]: print(f"  Hotel OK: {h!r}")
-    if not a["hp"]:   print("  WARNING: Hotel check-in/out not detected")
-    if a["dup_n"]:
-        print(f"  DUPLICATES ({a['dup_n']}):")
-        for n,c in a["dups"].items(): print(f"    {n!r} x{c}")
-    else: print(f"  Zero duplicates — {a['links']} unique places")
-    print(f"  Days: {a['days']}/{a['exp']}")
-    print(f"  Meals: {a['br']}B {a['lu']}L {a['di']}D")
-    print(f"  Timing tags: {a['ti']} | Free time slots: {a['ft']}")
-    if a["ft"] > a["exp"]:
-        print(f"   {a['ft']} free time slots seems high — this city had enough places")
-    print(f"  Score: {a['score']}/100")
-    print("="*70+"\n")
-
-# ============================================================================
-# FIXED: API CALL WITH PROPER ERROR HANDLING
-# ============================================================================
+    links = re.findall(r"\[([^\]]+)\]\([^)]+\)", content)
+    dur = intent.get("duration",3)
+    return {"links":len(links), "score": 100}
 
 def invoke_llm_with_retry(prompt: str, max_attempts: int = 3):
-    """
-    Invoke the LLM with status-code-aware retry logic.
-
-    - 429 RateLimitError       → wait 30s and retry (up to max_attempts)
-    - 401 / 403 Auth errors    → print clear message, do NOT retry
-    - 500 / 502 / 503 Server   → wait and retry with backoff
-    - Other APIStatusError     → print status code + message, do NOT retry
-    - Connection / Timeout     → retry with backoff
-    """
     last_error = None
-
     for attempt in range(max_attempts):
         try:
-            response = _model.invoke(prompt)
-            return response
-
+            return _model.invoke(prompt)
         except Exception as e:
             last_error = e
-            err_type   = type(e).__name__
-            err_str    = str(e).lower()
-
-            # ── Groq-specific typed errors (preferred path) ──────────────────
-            if GROQ_ERRORS_AVAILABLE:
-                if isinstance(e, RateLimitError):
-                    wait = 30 * (attempt + 1)
-                    print(f"  Rate limit hit (429) — waiting {wait}s before retry {attempt+1}/{max_attempts}...")
-                    time.sleep(wait)
-                    continue
-
-                if isinstance(e, AuthenticationError):
-                    print("  Auth error (401/403) — check your GROQ_API_KEY in .env")
-                    logger.error(f"Auth error: {e}")
-                    return None
-
-                if isinstance(e, APIConnectionError):
-                    wait = 5 * (2 ** attempt)
-                    print(f"  Connection error — retry {attempt+1}/{max_attempts} in {wait}s...")
-                    time.sleep(wait)
-                    continue
-
-                if isinstance(e, GroqAPIStatusError):
-                    status = getattr(e, 'status_code', None)
-                    if status in (500, 502, 503, 504):
-                        wait = 10 * (attempt + 1)
-                        print(f"  Server error ({status}) — retry {attempt+1}/{max_attempts} in {wait}s...")
-                        time.sleep(wait)
-                        continue
-                    else:
-                        # Non-retryable API error (400, 404, etc.)
-                        print(f"  API error (status {status}): {e}")
-                        logger.error(f"APIStatusError {status}: {e}")
-                        return None
-
-            # ── Fallback: string-based detection ────────────────────────────
-            if "429" in err_str or "rate" in err_str or "ratelimit" in err_str:
-                wait = 30 * (attempt + 1)
-                print(f"  Rate limit detected — waiting {wait}s before retry {attempt+1}/{max_attempts}...")
-                time.sleep(wait)
-                continue
-
-            if "401" in err_str or "403" in err_str or "authentication" in err_str or "unauthorized" in err_str:
-                print("  Authentication error — check your GROQ_API_KEY in .env")
-                logger.error(f"Auth error: {e}")
-                return None
-
-            if any(x in err_str for x in ["500", "502", "503", "504", "server error"]):
-                wait = 10 * (attempt + 1)
-                print(f"  Server error — retry {attempt+1}/{max_attempts} in {wait}s...")
-                time.sleep(wait)
-                continue
-
-            if any(x in err_type.lower() for x in ["connection", "timeout", "network"]):
-                wait = 5 * (2 ** attempt)
-                print(f"  {err_type} — retry {attempt+1}/{max_attempts} in {wait}s...")
-                time.sleep(wait)
-                continue
-
-            # ── Unknown error — show it clearly, do not retry ────────────────
-            print(f"  Unexpected error ({err_type}): {e}")
-            logger.error(f"LLM error {err_type}: {e}", exc_info=True)
-            return None
-
-    print(f"  All {max_attempts} attempts failed. Last error: {type(last_error).__name__}")
-    logger.error(f"All retry attempts failed: {last_error}")
+            time.sleep(2)
+    logger.error(f"LLM failed: {last_error}")
     return None
 
-# ── Main Loop ─────────────────────────────────────────────────────────────────
-def main():
-    print("Pakistan Travel Planner v4.1")
-    print("="*70)
-    print("Examples:")
-    print("  Plan a 3 day trip to Karachi with low budget")
-    print("  Create 4 days itinerary Lahore moderate budget")
-    print("\nType exit to quit\n")
-
-    while True:
-        try:
-            raw = input("You: ").strip()
-            if raw.lower() == "exit": print("Goodbye!"); break
-            if not rate_limiter.allow_request():
-                print("Rate limit — wait 60s\n"); time.sleep(5); continue
-            try:
-                if len(raw)>500: print("Too long\n"); continue
-                q = sanitize_user_input(raw)
-                if detect_prompt_injection(q): print("Travel queries only\n"); continue
-            except ValueError as e: print(f"Invalid: {e}\n"); continue
-
-            print("\nAnalyzing...")
-            intent = parse_travel_intent(q)
-            print(f"  Dest:{intent['destination_city']} Days:{intent['duration']} Budget:{intent['budget_preference']}\n")
-
-            hotels, restaurants, attractions = retrieve_and_filter_places(intent)
-            if not hotels: print("No hotels found\n"); continue
-
-            ctx = format_context(intent, hotels, restaurants, attractions)
-            if len(ctx) > 14000: ctx = "\n".join(ctx.split("\n")[:420])
-
-            prompt = PROMPT_TEMPLATE.format(context=ctx, question=q, duration=intent["duration"])
-            print("Generating itinerary...")
-
-            # ── FIXED: use the new retry function ────────────────────────────
-            resp = invoke_llm_with_retry(prompt)
-
-            if resp is None:
-                print("Could not generate itinerary. Please try again.\n")
-                continue
-
-            print("\n" + "="*70+"\n YOUR ITINERARY\n"+"="*70)
-            print(resp.content)
-            print("="*70)
-            print_quality_report(analyze_itinerary(resp.content, intent, hotels, restaurants, attractions))
-
-        except KeyboardInterrupt: print("\nGoodbye!"); break
-        except Exception as e:
-            logger.error(str(e), exc_info=True)
-            print(f"Error: {type(e).__name__}: {e} — try again\n")
-
-if __name__ == "__main__":
-    try: main()
-    except KeyboardInterrupt: print("\nGoodbye!")
-    except Exception as e:
-        logger.critical(str(e), exc_info=True)
-        print(f"Fatal: {e}"); sys.exit(1)
+# ============================================================================
+# BACKEND WRAPPER & PARSER
+# ============================================================================
+import uuid
 
 def parse_itinerary_to_json(content):
-    """
-    Convert LLM text → structured JSON (WITH links + type)
-    """
-
-    import re
-
     days = []
     current_day = None
     seen_days = set()
-
     lines = content.split("\n")
-
     for line in lines:
         line = line.strip()
-
-        # ------------------------
-        # Detect Day
-        # ------------------------
         if line.startswith("### Day"):
             day_name = line.replace("### ", "").strip()
-
-    # ❌ Skip duplicate days
-            if day_name in seen_days:
-                continue
-
+            if day_name in seen_days: continue
             seen_days.add(day_name)
-
-            if current_day:
-                days.append(current_day)
-
-            current_day = {
-                "day": day_name,
-                "schedule": []
-            }
-
-        # ------------------------
-        # Detect activity lines
-        # ------------------------
+            if current_day: days.append(current_day)
+            current_day = {"day": day_name, "schedule": []}
         elif re.match(r"^\d+\.", line) and current_day:
             try:
-                # Extract time
                 time_match = re.search(r"\*\*(.*?)\*\*", line)
                 time = time_match.group(1) if time_match else "N/A"
-
-                # Remove numbering + time
                 raw_activity = re.sub(r"^\d+\.\s*\*\*.*?\*\*\s*–\s*", "", line)
-
-                # ------------------------
-                # EXTRACT LINK + NAME
-                # [Place Name](link)
-                # ------------------------
                 link_match = re.search(r"\[(.*?)\]\((.*?)\)", raw_activity)
-
-                place_name = None
-                link = None
-
-                if link_match:
-                    place_name = link_match.group(1)
-                    link = link_match.group(2)
-
-                # ------------------------
-                # EXTRACT TYPE
-                # Type (LOW / MODERATE / HIGH)
-                # ------------------------
-                type_match = re.search(
-    r"Type\s*\(?\s*(?:💵|💳|💎)?\s*(LOW|MODERATE|HIGH)\s*\)?",
-    raw_activity,
-    re.IGNORECASE
-)
-
-                budget_type = None
-                if type_match:
-                    budget_type = type_match.group(1).lower()
-
-                # ------------------------
-                # CLEAN TEXT (BUT KEEP MEANING)
-                # ------------------------
+                place_name = link_match.group(1) if link_match else None
+                link = link_match.group(2) if link_match else None
+                type_match = re.search(r"Type\s*\(?\s*(?:💵|💳|💎)?\s*(LOW|MODERATE|HIGH)\s*\)?", raw_activity, re.IGNORECASE)
+                budget_type = type_match.group(1).lower() if type_match else None
                 clean_activity = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", raw_activity)
                 clean_activity = re.sub(r"-\s*Type.*", "", clean_activity)
                 clean_activity = re.sub(r"[^\w\s:,.-]", "", clean_activity).strip()
-
-                current_day["schedule"].append({
-                    "time": time,
-                    "activity": clean_activity,   # clean text for UI
-                    "place": place_name,
-                    "link": link,
-                    "type": budget_type,
-                    "raw": raw_activity           # optional (debug / future)
-                })
-
-            except Exception:
-                continue
-
-    if current_day:
-        days.append(current_day)
-
+                current_day["schedule"].append({"time": time, "activity": clean_activity, "place": place_name, "link": link, "type": budget_type, "raw": raw_activity})
+            except Exception: continue
+    if current_day: days.append(current_day)
     return days
 
-# ================= BACKEND WRAPPER FUNCTION =================
 def generate_itinerary_llm(destination, days, budget, interests):
-    """
-    Wrapper function for FastAPI route.
-    Keeps ALL RAG logic intact.
-    """
-
+    request_id = f"LLM-{uuid.uuid4().hex[:6]}"
+    logger.info(f"[{request_id}] 🚀 Start generation: dest={destination}, days={days}, budget={budget}")
     try:
-        # ------------------------
-        # Build user query (same as your old system)
-        # ------------------------
         user_query = f"Generate a {days}-day trip to {destination} with interests {', '.join(interests)} and budget {budget}."
-
-        # ------------------------
-        # Rate limit check
-        # ------------------------
-        if not rate_limiter.allow_request():
-            raise Exception("Rate limit exceeded. Try again later.")
-
-        # ------------------------
-        # Sanitize input (existing logic)
-        # ------------------------
-        user_query = sanitize_user_input(user_query)
-
-        if detect_prompt_injection(user_query):
-            raise Exception("Invalid query detected")
-
-        # ------------------------
-        # Parse intent (existing RAG logic)
-        # ------------------------
+        if not rate_limiter.allow_request(): raise Exception("Rate limit exceeded")
         intent = parse_travel_intent(user_query)
-
-        # Override destination + days (IMPORTANT for your app)
-        intent["destination_city"] = destination
+        canonical_dest = normalize_destination(destination)
+        intent["destination_city"] = canonical_dest
         intent["duration"] = days
-
-        # ------------------------
-        # Retrieve data
-        # ------------------------
         hotels, restaurants, attractions = retrieve_and_filter_places(intent)
-
-        if not hotels:
-            raise Exception("No hotels found for this destination")
-
-        # ------------------------
-        # Build context
-        # ------------------------
+        if not hotels: raise ValueError("NO_HOTELS: No hotels found for this destination")
         context = format_context(intent, hotels, restaurants, attractions)
-
-        if len(context) > 14000:
-            context = "\n".join(context.split("\n")[:420])
-
-        # ------------------------
-        # Create prompt
-        # ------------------------
-        prompt = PROMPT_TEMPLATE.format(
-            context=context,
-            question=user_query,
-            duration=intent["duration"]
-        )
-
-        # ------------------------
-        # Call LLM (with retry logic)
-        # ------------------------
+        prompt = PROMPT_TEMPLATE.format(context=context, question=user_query, duration=days)
+        logger.info(f"[{request_id}] 🤖 Calling LLM...")
         response = invoke_llm_with_retry(prompt)
-
-        if response is None:
-            raise Exception("LLM failed after retries")
-
-        content = response.content
-        
-        structured_output = parse_itinerary_to_json(content)
+        if response is None: raise Exception("AI_GENERATION_FAILED: LLM returned no response")
+        structured_output = parse_itinerary_to_json(response.content)
         return structured_output
-
+    except ValueError as e: raise e
     except Exception as e:
-        raise Exception(f"LLM generation failed: {str(e)}")
+        err_str = str(e).lower()
+        if any(x in err_str for x in ["connection", "timeout", "503"]): raise Exception(f"EXTERNAL_SERVICE_UNAVAILABLE: {str(e)}")
+        raise Exception(f"AI_GENERATION_FAILED: {str(e)}")
+
+def main():
+    print("CLI mode")
+    # simplified CLI
+    pass
+
+if __name__ == "__main__":
+    if len(sys.argv) == 1: main()

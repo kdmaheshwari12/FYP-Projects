@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     # ---------- Roles ----------
     DEFAULT_USER_ROLE: str = "user"  # "user" | "admin" | "broker"
 
+    # ---------- External APIs ----------
+    OPENWEATHER_API_KEY: str = os.getenv("OPENWEATHER_API_KEY", "")
+    DEBUG: bool = os.getenv("DEBUG", "true").lower() == "true"
+
     class Config:
         case_sensitive = True
 

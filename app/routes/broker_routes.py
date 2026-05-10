@@ -215,31 +215,17 @@ async def broker_verification(data: dict):
 # ------------------------------------------------------
 # 1️⃣ CREATE ITINERARY
 # ------------------------------------------------------
+from app.middleware.auth_middleware import require_broker
+
 @router.post("/itineraries")
-async def create_itinerary(data: dict, current_user: dict = Depends(get_current_user_obj)):
+async def create_itinerary(
+    data: dict, 
+    current_user: dict = Depends(require_broker)
+):
     """
     Create a new itinerary with comprehensive validation.
-    
-    Required Fields:
-    {
-      "title": "Hunza Valley Adventure",
-      "departure_location": "Islamabad",
-      "arrival_location": "Hunza",
-      "duration_days": 7,
-      "price_per_person": 15000,
-      "description": "Amazing trip description",
-      "phone": "0300-1234567",
-      "email": "broker@example.com",
-      "trip_locations": ["Islamabad", "Hunza"],
-      "days": [...],
-      "cover_image": "url"
-    }
     """
     errors = []
-    
-    # ========== ROLE CHECK ==========
-    if current_user["role"] != "broker":
-        raise HTTPException(status_code=403, detail="Only brokers can create itineraries")
     
     # ========== TITLE VALIDATION ==========
     try:
@@ -598,52 +584,6 @@ async def get_broker_contact_info(
     info["brokerId"] = str(info["brokerId"])
 
     return info
-# ------------------------------------------------------
-# GLOBAL CONTACT INFO ROUTE (Create/Update)
-# ------------------------------------------------------
-@router.put("/contact-info")
-async def update_broker_contact_info(
-    data: dict,
-    current_user: dict = Depends(get_current_user_obj)
-):
-
-    if current_user["role"] != "broker":
-        raise HTTPException(status_code=403, detail="Only brokers allowed")
-
-    broker_id = ObjectId(current_user["_id"])
-
-    contact_info = {
-        "phone": data.get("phone", ""),
-        "whatsapp": data.get("whatsapp", ""),
-        "email": data.get("email", ""),
-        "updated_at": datetime.utcnow()
-    }
-
-    # Check if record exists
-    existing = await broker_collection.find_one(
-        {"brokerId": broker_id}
-    )
-
-    if existing:
-        # Update existing contact info
-        await broker_collection.update_one(
-            {"brokerId": broker_id},
-            {"$set": contact_info}
-        )
-    else:
-        # Create new contact info record
-        await broker_collection.insert_one(
-            { "brokerId": broker_id, **contact_info }
-        )
-
-    # ALSO update all itineraries with new contact info
-    await broker_itineraries_collection.update_many(
-        {"brokerId": broker_id},
-        {"$set": {"contact_info": contact_info}}
-    )
-
-    return {"message": "Contact info updated for broker and all itineraries"}
-
 from typing import Optional
 from bson import ObjectId
 from app.db.mongodb import (

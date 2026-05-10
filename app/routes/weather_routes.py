@@ -11,116 +11,91 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/weather", tags=["Weather"])
 
-OPENWEATHER_API_KEY = os.getenv("OPENWEATHER_KEY")
-
-
-# -------- 1) LIVE WEATHER FETCH -------- #
-from datetime import timedelta
-
-from datetime import datetime, timedelta
-from fastapi import HTTPException
-import httpx
+from app.core.config import settings
 
 @router.get("/live")
 async def get_live_weather(city: str):
     """
-    Get live weather for a city with validation.
-    
-    Parameters:
-        city: City name (validated)
-    
-    Returns:
-        Weather data from OpenWeather API
-        
-    Raises:
-        422: Invalid city format
-        400: Weather service error
+    Get live weather for a city with validation and caching.
     """
+    # 1️⃣ Validate City
     try:
-        # ========== CITY VALIDATION ==========
-        validated_city = validate_string(
-            city,
-            "city",
-            allow_empty=False,
-            min_length=2,
-            max_length=100
-        )
-        # Normalize to title case for API
-        validated_city = validated_city.title()
-        
+        validated_city = validate_string(city, "city", allow_empty=False, min_length=2).title()
     except ValidationError as e:
-        logger.warning(f"Weather city validation failed: {e.message}")
-        raise HTTPException(
-            status_code=422,
-            detail={"error": e.message, "field": "city"}
-        )
-    
+        raise HTTPException(status_code=422, detail=f"Invalid city name: {e.message}")
+
+    # 2️⃣ Check Cache (last 15 minutes)
     try:
-        # 1️⃣ Check cache (last 10 minutes)
-        cached = await weather_collection.find_one(
-            {
-                "city": validated_city,
-                "weather": {"$exists": True},
-                "timestamp": {
-                    "$gte": datetime.utcnow() - timedelta(minutes=10)
-                }
-            },
-            sort=[("timestamp", -1)]
-        )
-
-        if cached:
-            ts = cached.get("timestamp")
-            logger.debug(f"Weather cache hit for city: {validated_city}")
-
-            return {
-                "status": "success",
-                "cached": True,
-                "data": cached["weather"],
-                "lastUpdatedAt": (
-                    ts.isoformat() if isinstance(ts, datetime) else str(ts)
-                )
-            }
-
-        # 2️⃣ Call OpenWeather only if cache miss
-        url = (
-            "https://api.openweathermap.org/data/2.5/weather"
-            f"?q={validated_city}&appid={OPENWEATHER_API_KEY}&units=metric"
-        )
-
-        async with httpx.AsyncClient(timeout=10) as client:
-            res = await client.get(url)
-
-        if res.status_code != 200:
-            logger.error(f"OpenWeather API error: {res.status_code} - {res.text}")
-            raise HTTPException(status_code=400, detail="City not found or API error")
-
-        data = res.json()
-
-        # 3️⃣ Store snapshot
-        now = datetime.utcnow()
-        await weather_collection.insert_one({
+        cached = await weather_collection.find_one({
             "city": validated_city,
-            "weather": data,
-            "timestamp": now
+            "timestamp": {"$gte": datetime.utcnow() - timedelta(minutes=15)}
         })
+        if cached and "weather_summary" in cached:
+            logger.info(f"Weather cache hit for {validated_city}")
+            return cached["weather_summary"]
+    except Exception as e:
+        logger.error(f"Cache lookup failed: {e}")
 
-        logger.info(f"Weather data fetched for city: {validated_city}")
+    # 3️⃣ Fetch from OpenWeather
+    api_key = settings.OPENWEATHER_API_KEY
+    if not api_key:
+        logger.error("OPENWEATHER_API_KEY is missing in settings")
+        raise HTTPException(status_code=500, detail="Weather service configuration error")
 
-        return {
-            "status": "success",
-            "cached": False,
-            "data": data,
-            "lastUpdatedAt": now.isoformat()
+    url = f"https://api.openweathermap.org/data/2.5/weather?q={validated_city}&appid={api_key}&units=metric"
+    
+    logger.debug(f"Fetching weather from: {url}")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url)
+            
+        logger.debug(f"Weather API status: {response.status_code}")
+        logger.debug(f"Weather API body: {response.text}")
+
+        if response.status_code == 401:
+            logger.error("Invalid OpenWeather API Key")
+            raise HTTPException(status_code=503, detail="Weather service unavailable (auth error)")
+        
+        if response.status_code == 404:
+            raise HTTPException(status_code=404, detail=f"City '{validated_city}' not found")
+
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail="Weather API error")
+
+        data = response.json()
+        
+        # 4️⃣ Format Response
+        summary = {
+            "city": data.get("name", validated_city),
+            "temperature": round(data["main"]["temp"]),
+            "humidity": data["main"]["humidity"],
+            "condition": data["weather"][0]["description"]
         }
 
-    except HTTPException:
-        raise
+        # 5️⃣ Update Cache
+        try:
+            await weather_collection.insert_one({
+                "city": validated_city,
+                "weather_summary": summary,
+                "raw_response": data,
+                "timestamp": datetime.utcnow()
+            })
+        except Exception as e:
+            logger.error(f"Failed to cache weather: {e}")
+
+        return summary
+
+    except httpx.TimeoutException:
+        logger.error("Weather API timeout")
+        raise HTTPException(status_code=504, detail="Weather service timed out")
+    except httpx.RequestError as e:
+        logger.error(f"Weather API connection error: {e}")
+        raise HTTPException(status_code=503, detail="Weather service unreachable")
     except Exception as e:
-        logger.error(f"❌ LIVE WEATHER ERROR: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Internal weather service error"
-        )
+        if isinstance(e, HTTPException): raise e
+        logger.error(f"Unexpected weather error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal weather service error")
 
 def serialize_mongo_doc(doc: dict):
     """
@@ -185,7 +160,7 @@ async def fetch_itinerary_weather(itinerary_id: str):
             raise HTTPException(400, "Itinerary has no destination field")
 
         # Fetch live weather for itinerary city
-        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+        url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={settings.OPENWEATHER_API_KEY}&units=metric"
 
         async with httpx.AsyncClient() as client:
             res = await client.get(url)
@@ -213,7 +188,7 @@ async def fetch_itinerary_weather(itinerary_id: str):
 @router.get("/forecast")
 async def get_forecast(city: str):
     try:
-        url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={OPENWEATHER_API_KEY}&units=metric"
+        url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={settings.OPENWEATHER_API_KEY}&units=metric"
 
         async with httpx.AsyncClient() as client:
             res = await client.get(url)

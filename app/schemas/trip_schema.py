@@ -21,6 +21,8 @@ class TripCreate(BaseModel):
     itinerary_id: Optional[str] = Field(None, description="Optional ID of an existing itinerary to reuse")
     trip_type: Optional[str] = Field("ai", description="Type of trip (ai, broker, ai_self, ai_broker)")
     broker_id: Optional[str] = Field(None, description="Optional broker ID if applicable")
+    latitude: Optional[float] = Field(None, description="Latitude of destination")
+    longitude: Optional[float] = Field(None, description="Longitude of destination")
 
     @model_validator(mode="before")
     @classmethod

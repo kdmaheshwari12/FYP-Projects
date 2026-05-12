@@ -16,6 +16,33 @@ router = APIRouter(prefix="/trips", tags=["Trips"])
 
 logger = logging.getLogger(__name__)
 
+# ── City Coordinate Resolver ────────────────────────────────────────────────
+CITY_COORDINATES = {
+    "karachi": (24.8607, 67.0011),
+    "lahore": (31.5204, 74.3587),
+    "islamabad": (33.6844, 73.0479),
+    "rawalpindi": (33.5651, 73.0169),
+    "peshawar": (34.0151, 71.5249),
+    "quetta": (30.1798, 66.9750),
+    "multan": (30.1575, 71.5249),
+    "faisalabad": (31.4504, 73.1350),
+    "hunza": (36.3167, 74.6500),
+    "skardu": (35.2971, 75.6337),
+    "swat": (34.7717, 72.3602),
+    "murree": (33.9070, 73.3943),
+    "gilgit": (35.9208, 74.3089),
+    "gwadar": (25.1216, 62.3254),
+    "muzaffarabad": (34.3700, 73.4708),
+    "kashmir": (34.3700, 73.4708),
+    "naran": (34.9022, 73.6522),
+    "kaghan": (34.7672, 73.5333),
+}
+
+def resolve_coordinates(city_name: str) -> tuple:
+    if not city_name: return None, None
+    clean_name = city_name.strip().lower()
+    return CITY_COORDINATES.get(clean_name, (None, None))
+
 # ============================================================
 # 1️⃣ CREATE TRIP (REUSE SAFE)
 # ============================================================
@@ -97,9 +124,19 @@ async def create_trip(
             "end_date": end_dt,
             "budget": trip_data.budget,
             "travel_style": trip_data.travel_style.value,
+            "latitude": trip_data.latitude,
+            "longitude": trip_data.longitude,
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow()
         }
+
+        # 5️⃣ Resolve coordinates if missing
+        if not trip_doc["latitude"] or not trip_doc["longitude"]:
+            res_lat, res_lng = resolve_coordinates(trip_data.destination)
+            if res_lat and res_lng:
+                trip_doc["latitude"] = res_lat
+                trip_doc["longitude"] = res_lng
+                logger.info(f"[{request_id}] 📍 Resolved coordinates for {trip_data.destination}: {res_lat}, {res_lng}")
 
         result = await trips_collection.insert_one(trip_doc)
         logger.info(f"[{request_id}] ✅ New trip created: {result.inserted_id}")
@@ -615,6 +652,8 @@ async def get_current_active_trip(
 
                 "created_at": trip.get("created_at"),
                 "updated_at": trip.get("updated_at"),
+                "latitude": trip.get("latitude"),
+                "longitude": trip.get("longitude"),
             }
         }
     except Exception as e:

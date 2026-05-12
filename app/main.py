@@ -226,6 +226,11 @@ async def root():
     }
 
 
+@app.get("/version", tags=["Health"])
+async def version():
+    return {"version": "v2026-05-13-01-52", "status": "deployed_with_chat_fixes"}
+
+
 @app.get("/ping", tags=["Health"])
 async def ping():
     return {"message": "pong"}

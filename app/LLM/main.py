@@ -357,7 +357,11 @@ def retrieve_and_filter_places(intent, k_per_query=100):
         if not name or not city: continue
         nn = normalize_place_name(name)
         if nn in used_norm_set or name in used_names: continue
-        if dest and city.lower().strip() != dest.lower().strip(): continue
+        if dest:
+            d_clean = dest.lower().strip()
+            c_clean = city.lower().strip()
+            if d_clean not in c_clean and c_clean not in d_clean:
+                continue
         bcat = normalize_budget_category(budget)
         if bud_pref and bcat != "unspecified":
             order = {"low":0,"moderate":1,"high":2}
@@ -603,7 +607,18 @@ def parse_itinerary_to_json(content):
                 safe_log("error", f"Error parsing line: {line} | {e}")
                 continue
                 
-    if current_day: days.append(current_day)
+    if current_day:
+        if current_day["schedule"]:
+            days.append(current_day)
+    
+    # Post-process: Ensure no nulls in fields
+    for d in days:
+        for item in d["schedule"]:
+            if not item.get("place"): item["place"] = "Interesting Place"
+            if not item.get("link"): 
+                item["link"] = f"https://www.google.com/maps/search/{item['place'].replace(' ', '+')}"
+            if not item.get("type"): item["type"] = "moderate"
+            
     return days
 
 
@@ -643,24 +658,38 @@ def generate_itinerary_llm(destination, days, budget, interests, departure_locat
             prompt = PROMPT_TEMPLATE.format_map(dd)
 
         safe_log("info", f"[{request_id}] 🤖 Calling LLM...")
-        response = invoke_llm_with_retry(prompt)
-        if response is None: raise Exception("AI_GENERATION_FAILED: LLM returned no response")
         
-        # Clean content (remove any preamble/postamble)
-        content = response.content
-        if "### Day 1" in content:
-            content = content[content.find("### Day 1"):]
-        
-        structured_output = parse_itinerary_to_json(content)
-        
-        # VALIDATION: Ensure exactly {days} days
-        if len(structured_output) > days:
-            safe_log("warning", f"[{request_id}] ⚠️ Truncating itinerary from {len(structured_output)} to {days} days")
-            structured_output = structured_output[:days]
-        elif len(structured_output) < days:
-            safe_log("warning", f"[{request_id}] ⚠️ LLM generated fewer days ({len(structured_output)}) than requested ({days})")
+        for attempt in range(3): # Try up to 3 times
+            response = invoke_llm_with_retry(prompt)
+            if not response: continue
             
-        return structured_output
+            content = response.content
+            # Locate first occurrence of Day 1 header
+            idx = content.find("### Day 1")
+            if idx != -1:
+                content = content[idx:]
+            
+            structured_output = parse_itinerary_to_json(content)
+            
+            # ── VALIDATION ────────────────────────────────────────────────────
+            is_valid = True
+            if len(structured_output) < days:
+                safe_log("warning", f"[{request_id}] Attempt {attempt+1}: Missing days ({len(structured_output)}/{days})")
+                is_valid = False
+            else:
+                for day_data in structured_output[:days]:
+                    if len(day_data["schedule"]) < 10: # Allow slight flexibility but fail if too empty
+                        safe_log("warning", f"[{request_id}] Attempt {attempt+1}: Day {day_data['day']} too short ({len(day_data['schedule'])} entries)")
+                        is_valid = False
+                        break
+            
+            if is_valid:
+                safe_log("info", f"[{request_id}] ✅ Successful generation on attempt {attempt+1}")
+                return structured_output[:days]
+            
+            safe_log("info", f"[{request_id}] 🔄 Retrying generation...")
+            
+        raise Exception(f"AI_GENERATION_FAILED: Could not generate a complete {days}-day itinerary after multiple attempts.")
     except ValueError as e: raise e
     except Exception as e:
         err_str = str(e).lower()

@@ -52,7 +52,12 @@ async def lifespan(app: FastAPI):
         await connect_to_mongo()
         logger.info("✅ MongoDB connected successfully.")
         
-        # 2. Add other startup tasks here (e.g. index checks)
+        # 2. Pre-load LLM resources (embeddings, index, etc.)
+        from app.LLM.main import get_llm_resources
+        import asyncio
+        logger.info("🤖 Pre-loading LLM resources...")
+        await asyncio.to_thread(get_llm_resources)
+        logger.info("✅ LLM resources loaded.")
         
         logger.info("⚡ Application startup complete.")
         yield

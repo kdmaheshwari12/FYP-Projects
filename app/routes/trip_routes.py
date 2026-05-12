@@ -31,7 +31,7 @@ async def create_trip(
     logger.info(f"[{request_id}] 🆕 CREATE_TRIP attempt | User: {current_user.get('email')}")
     
     try:
-        # Check if we should reuse an existing trip (only if itinerary_id is provided)
+        # 2️⃣ Validate and convert IDs
         itinerary_obj_id = None
         if trip_data.itinerary_id:
             try:
@@ -42,7 +42,18 @@ async def create_trip(
                     content={"success": False, "message": "Invalid itinerary_id format"}
                 )
 
-            # Re-use logic: Check if user already has a trip for this itinerary
+        broker_obj_id = None
+        if trip_data.broker_id:
+            try:
+                broker_obj_id = ObjectId(trip_data.broker_id)
+            except Exception:
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": "Invalid broker_id format"}
+                )
+
+        # 3️⃣ Check for trip re-use
+        if itinerary_obj_id:
             existing_trip = await trips_collection.find_one({
                 "user_id": ObjectId(current_user["_id"]),
                 "itinerary_source_id": itinerary_obj_id,
@@ -51,6 +62,17 @@ async def create_trip(
 
             if existing_trip:
                 logger.info(f"[{request_id}] 🔁 Trip reused: {existing_trip['_id']}")
+                
+                if not existing_trip.get("broker_id") and broker_obj_id:
+                    await trips_collection.update_one(
+                        {"_id": existing_trip["_id"]},
+                        {"$set": {
+                            "broker_id": broker_obj_id,
+                            "status": "chatting"
+                        }}
+                    )
+                    existing_trip["status"] = "chatting"
+
                 return {
                     "success": True,
                     "message": "Trip details retrieved",
@@ -59,8 +81,7 @@ async def create_trip(
                     "status": existing_trip.get("status", "draft")
                 }
 
-        # Create new trip document
-        # Convert date to datetime for MongoDB
+        # 4️⃣ Create new trip document
         start_dt = datetime.combine(trip_data.start_date, datetime.min.time())
         end_dt = datetime.combine(trip_data.end_date, datetime.min.time())
 
@@ -68,8 +89,8 @@ async def create_trip(
             "user_id": ObjectId(current_user["_id"]),
             "trip_type": trip_data.trip_type,
             "itinerary_source_id": itinerary_obj_id,
-            "broker_id": ObjectId(trip_data.broker_id) if trip_data.broker_id else None,
-            "status": "chatting" if trip_data.broker_id else "draft",
+            "broker_id": broker_obj_id,
+            "status": "chatting" if broker_obj_id else "draft",
             "destination": trip_data.destination,
             "departure_location": trip_data.departure_location,
             "start_date": start_dt,
@@ -120,10 +141,14 @@ async def get_trip_itinerary_context(
     trip_id: str,
     current_user: dict = Depends(get_current_user_obj)
 ):
-    # 1️⃣ Fetch trip
-    trip = await trips_collection.find_one(
-        {"_id": ObjectId(trip_id)}
-    )
+    # 1️⃣ Validate trip_id
+    try:
+        trip_obj_id = ObjectId(trip_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid trip_id format")
+
+    # 2️⃣ Fetch trip
+    trip = await trips_collection.find_one({"_id": trip_obj_id})
 
     if not trip:
         raise HTTPException(status_code=404, detail="Trip not found")
@@ -334,9 +359,17 @@ async def get_trip_chat_peer(
             detail="You are not part of this trip"
         )
 
+    # 👤 Fetch peer name
+    peer_user = await users_collection.find_one(
+        {"_id": peer_id},
+        {"full_name": 1}
+    )
+    peer_name = peer_user.get("full_name", "User") if peer_user else "User"
+
     return {
         "peerUid": str(peer_id),
-        "peerRole": peer_role
+        "peerRole": peer_role,
+        "peerName": peer_name
     }
 
 @router.patch("/{trip_id}/activate")

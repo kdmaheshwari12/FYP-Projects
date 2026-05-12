@@ -17,7 +17,7 @@ class TripCreate(BaseModel):
     start_date: date = Field(..., description="Trip start date")
     end_date: date = Field(..., description="Trip end date")
     budget: Union[float, str] = Field(..., description="Trip budget in PKR or category (low, moderate, high)")
-    travel_style: TravelStyle = Field(..., description="Travel style (e.g. adventure, luxury)")
+    travel_style: Optional[TravelStyle] = Field(default=TravelStyle.adventure, description="Travel style (e.g. adventure, luxury)")
     itinerary_id: Optional[str] = Field(None, description="Optional ID of an existing itinerary to reuse")
     trip_type: Optional[str] = Field("ai", description="Type of trip (ai, broker, ai_self, ai_broker)")
     broker_id: Optional[str] = Field(None, description="Optional broker ID if applicable")
@@ -31,12 +31,18 @@ class TripCreate(BaseModel):
         budget_val = data.get("budget")
         if isinstance(budget_val, str):
             mapping = {"low": 20000, "moderate": 50000, "high": 150000}
+            
+            # Clean numeric strings (remove commas, currency symbols, whitespace)
+            clean_val = "".join(c for c in budget_val if c.isdigit() or c == ".")
+            
             try:
-                # Try converting to float first in case it's a numeric string
-                data["budget"] = float(budget_val)
+                if clean_val:
+                    data["budget"] = float(clean_val)
+                else:
+                    # Not a numeric string, check category mapping
+                    data["budget"] = mapping.get(budget_val.lower().strip(), 50000)
             except (ValueError, TypeError):
-                # If not a numeric string, check mapping
-                data["budget"] = mapping.get(budget_val.lower(), 50000)
+                data["budget"] = mapping.get(budget_val.lower().strip(), 50000)
         return data
 
     @field_validator("trip_type")
@@ -47,21 +53,23 @@ class TripCreate(BaseModel):
             raise ValueError(f"Trip type must be one of: {', '.join(allowed)}")
         return v.lower()
 
-    @field_validator("destination", "departure_location", mode="before")
+    @field_validator("destination", "departure_location", "travel_style", mode="before")
     @classmethod
-    def validate_not_empty(cls, v: object) -> str:
-        if v is None or (isinstance(v, str) and not v.strip()):
-            raise ValueError("Field cannot be empty")
-        return str(v).strip()
+    def validate_and_clean(cls, v: any, info: any) -> str:
+        if v is None:
+            if info.field_name == "travel_style":
+                return "adventure"
+            raise ValueError(f"{info.field_name} cannot be None")
+        
+        if isinstance(v, str):
+            v = v.strip().lower()
+            if not v:
+                raise ValueError(f"{info.field_name} cannot be empty")
+            return v
+        return v
 
     @model_validator(mode="after")
     def validate_trip_dates(self) -> "TripCreate":
         if self.end_date <= self.start_date:
             raise ValueError("End date must be after start date")
-        return self
-
-    @model_validator(mode="after")
-    def validate_destination_departure(self) -> "TripCreate":
-        if self.destination.lower() == self.departure_location.lower():
-            raise ValueError("Destination and departure location cannot be the same")
         return self

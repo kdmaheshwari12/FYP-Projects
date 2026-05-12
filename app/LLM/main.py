@@ -77,12 +77,18 @@ _model = None
 PAKISTAN_CITIES = []
 CITY_RE = None
 
+import threading
+_init_lock = threading.Lock()
+
 def get_llm_resources():
     global embedding_model, vector_store, _model, PAKISTAN_CITIES, CITY_RE
-    if _model is not None:
+    if _model is not None and CITY_RE is not None:
         return _model, vector_store, CITY_RE
 
-    print("🚀 Initializing LLM Resources (First time)...")
+    with _init_lock:
+        if _model is not None and CITY_RE is not None:
+            return _model, vector_store, CITY_RE
+        print("🚀 Initializing LLM Resources (First time)...")
     
     # ── Path Validation ───────────────────────────────────────────────────────────
     valid_index_path = validate_safe_path(INDEX_PATH, BASE_DIR)

@@ -14,6 +14,7 @@ router = APIRouter(prefix="/chat", tags=["Chat"])
 
 COMETCHAT_APP_ID = os.getenv("COMETCHAT_APP_ID")
 COMETCHAT_REGION = os.getenv("COMETCHAT_REGION")
+COMETCHAT_API_KEY = os.getenv("COMETCHAT_API_KEY")
 COMETCHAT_AUTH_KEY = os.getenv("COMETCHAT_AUTH_KEY")
 
 
@@ -114,7 +115,7 @@ async def get_chat_token(
 
         headers = {
             "Content-Type": "application/json",
-            "apiKey": COMETCHAT_AUTH_KEY,
+            "apiKey": COMETCHAT_API_KEY,
             "appId": COMETCHAT_APP_ID,
         }
 

@@ -477,56 +477,64 @@ async def activate_trip(
 async def get_current_active_trip(
     current_user: dict = Depends(get_current_user_obj)
 ):
-    if current_user["role"] != "traveler":
-        raise HTTPException(status_code=403, detail="Only travelers allowed")
+    try:
+        user_id = current_user.get("_id")
+        user_role = current_user.get("role")
+        logger.info(f"🔍 Checking active trip for user: {user_id} (role: {user_role})")
 
-    trip = await trips_collection.find_one(
-        {
-            "user_id": ObjectId(current_user["_id"]),
-            "status": { "$in": ["active", "completion_pending"] }
-        },
-        sort=[
-            ("start_date", -1),   # preferred
-            ("created_at", -1)    # fallback
-        ]
-    )
+        if user_role != "traveler":
+            raise HTTPException(status_code=403, detail="Only travelers allowed")
 
-    if not trip:
-        return {"hasActiveTrip": False}
+        trip = await trips_collection.find_one(
+            {
+                "user_id": ObjectId(current_user["_id"]),
+                "status": { "$in": ["active", "completion_pending"] }
+            },
+            sort=[
+                ("start_date", -1),   # preferred
+                ("created_at", -1)    # fallback
+            ]
+        )
 
-    return {
-        "hasActiveTrip": True,
-        "trip": {
-            "trip_id": str(trip["_id"]),
-            "trip_type": trip.get("trip_type"),
-            "status": trip.get("status"),
-            "destination": trip.get("destination"),
-            "budget": trip.get("budget"),
+        if not trip:
+            return {"hasActiveTrip": False}
 
-            "start_date": trip.get("start_date") or trip.get("created_at"),
+        return {
+            "hasActiveTrip": True,
+            "trip": {
+                "trip_id": str(trip["_id"]),
+                "trip_type": trip.get("trip_type"),
+                "status": trip.get("status"),
+                "destination": trip.get("destination"),
+                "budget": trip.get("budget"),
 
-            "itinerary_source_id": (
-                str(trip["itinerary_source_id"])
-                if trip.get("itinerary_source_id")
-                else None
-            ),
+                "start_date": trip.get("start_date") or trip.get("created_at"),
 
-            "broker_id": (
-                str(trip["broker_id"])
-                if trip.get("broker_id")
-                else None
-            ),
+                "itinerary_source_id": (
+                    str(trip["itinerary_source_id"])
+                    if trip.get("itinerary_source_id")
+                    else None
+                ),
 
-            "chat_id": (
-                str(trip["chat_id"])
-                if trip.get("chat_id")
-                else None
-            ),
+                "broker_id": (
+                    str(trip["broker_id"])
+                    if trip.get("broker_id")
+                    else None
+                ),
 
-            "created_at": trip.get("created_at"),
-            "updated_at": trip.get("updated_at"),
+                "chat_id": (
+                    str(trip["chat_id"])
+                    if trip.get("chat_id")
+                    else None
+                ),
+
+                "created_at": trip.get("created_at"),
+                "updated_at": trip.get("updated_at"),
+            }
         }
-    }
+    except Exception as e:
+        logger.error(f"💥 ERROR in get_current_active_trip: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
 
 @router.patch("/{trip_id}/complete")
 async def complete_trip(

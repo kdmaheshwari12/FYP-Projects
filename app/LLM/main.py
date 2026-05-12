@@ -34,12 +34,17 @@ class SecureLogFormatter(logging.Formatter):
             record.msg = self.CTRL.sub("", str(record.msg))
         return super().format(record)
 
-logging.basicConfig(filename="security.log", level=logging.WARNING,
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s")
-logger = logging.getLogger(__name__)
-_h = logging.FileHandler("security.log", mode="a", encoding="utf-8")
-_h.setFormatter(SecureLogFormatter())
-logger.addHandler(_h)
+logger = logging.getLogger(__name__) 
+
+def safe_log(level, msg, *args, **kwargs):
+    """Log a message safely without crashing the main flow."""
+    try:
+        if level == "info": logger.info(msg, *args, **kwargs)
+        elif level == "warning": logger.warning(msg, *args, **kwargs)
+        elif level == "error": logger.error(msg, *args, **kwargs)
+        else: logger.debug(msg, *args, **kwargs)
+    except:
+        print(f"[{level.upper()}] {msg}") # Fallback to print if logging fails
 
 load_dotenv()
 API_KEY             = os.getenv("GROQ_API_KEY", "").strip()
@@ -47,23 +52,6 @@ BASE_DIR = os.path.dirname(__file__)
 INDEX_PATH = os.path.join(BASE_DIR, os.getenv("INDEX_PATH", "vector_index.faiss.backup").strip())
 FAISS_CHECKSUM      = os.getenv("FAISS_CHECKSUM", "").strip() or None
 MAX_QUERIES_PER_MIN = int(os.getenv("MAX_QUERIES_PER_MINUTE", "10"))
-
-print("=" * 70)
-print("PAKISTAN TRAVEL RAG v4.1")
-print("=" * 70)
-
-# ── API Key ───────────────────────────────────────────────────────────────────
-def validate_api_key(key):
-    if not key: raise ValueError("GROQ_API_KEY missing")
-    key = key.strip()
-    if not (20 <= len(key) <= 200): raise ValueError(f"Bad key length {len(key)}")
-    if not re.match(r"^[a-zA-Z0-9\-_]+$", key): raise ValueError("Bad key chars")
-    return key
-
-try:
-    API_KEY = validate_api_key(API_KEY)
-except ValueError as e:
-    print(f"ERROR: {e}"); sys.exit(1)
 
 # ── Path Validation ───────────────────────────────────────────────────────────
 def validate_safe_path(fp, allowed="."):
@@ -82,53 +70,76 @@ def validate_safe_path(fp, allowed="."):
         return str(p)
     except Exception as e: raise ValueError(f"Invalid path: {e}")
 
-INDEX_PATH = validate_safe_path(INDEX_PATH, BASE_DIR)
-if not os.path.exists(INDEX_PATH):
-    print("ERROR: FAISS index not found. Run: python app/LLM/encoding.py"); sys.exit(1)
+# Global states (lazily loaded)
+embedding_model = None
+vector_store = None
+_model = None
+PAKISTAN_CITIES = []
+CITY_RE = None
 
-# ── FAISS Integrity ───────────────────────────────────────────────────────────
-if FAISS_CHECKSUM:
-    f = os.path.join(INDEX_PATH, "index.faiss") if os.path.isdir(INDEX_PATH) else INDEX_PATH
-    h = hashlib.sha256(open(f,"rb").read()).hexdigest()
-    if h != FAISS_CHECKSUM: print("CRITICAL: FAISS integrity FAILED"); sys.exit(1)
-    print("FAISS integrity OK\n")
-else:
-    print("WARNING: FAISS integrity check SKIPPED\n")
+def get_llm_resources():
+    global embedding_model, vector_store, _model, PAKISTAN_CITIES, CITY_RE
+    if _model is not None:
+        return _model, vector_store, CITY_RE
 
-# ── Load Models ───────────────────────────────────────────────────────────────
-print("Loading models...")
+    print("🚀 Initializing LLM Resources (First time)...")
+    
+    # ── Path Validation ───────────────────────────────────────────────────────────
+    valid_index_path = validate_safe_path(INDEX_PATH, BASE_DIR)
+    if not os.path.exists(valid_index_path):
+        raise FileNotFoundError(f"FAISS index not found at {valid_index_path}")
+
+    # ── Load Models ───────────────────────────────────────────────────────────────
+    try:
+        embedding_model = HuggingFaceEmbeddings(
+            model_name="thenlper/gte-small",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True}
+        )
+        vector_store = FAISS.load_local(valid_index_path, embedding_model, allow_dangerous_deserialization=True)
+        
+        _model = ChatGroq(api_key=API_KEY, model_name="llama-3.3-70b-versatile",
+                          temperature=0.1, max_tokens=4096, timeout=60)
+        
+        # Load cities
+        cities = set()
+        for q in ["Pakistan","city","places","travel","tourism"]:
+            try:
+                for doc in vector_store.similarity_search(q, k=50): # Reduced k for speed
+                    c = doc.metadata.get("Places_city","").strip()
+                    if c and len(c) > 2: cities.add(c.lower())
+            except: pass
+        
+        if cities:
+            PAKISTAN_CITIES = sorted(cities)
+        else:
+            PAKISTAN_CITIES = ["karachi","lahore","islamabad","rawalpindi","faisalabad",
+                              "multan","peshawar","quetta","hyderabad","abbottabad"]
+        
+        CITY_RE = re.compile(r"\b(" + "|".join(re.escape(c) for c in PAKISTAN_CITIES) + r")\b", re.IGNORECASE)
+        
+        print(f"✅ LLM Ready. Loaded {len(PAKISTAN_CITIES)} cities.")
+        return _model, vector_store, CITY_RE
+    except Exception as e:
+        print(f"❌ Error loading models: {e}")
+        raise e
+
+def validate_api_key(key):
+    if not key: raise ValueError("GROQ_API_KEY missing")
+    key = key.strip()
+    if not (20 <= len(key) <= 200): raise ValueError(f"Bad key length {len(key)}")
+    if not re.match(r"^[a-zA-Z0-9\-_]+$", key): raise ValueError("Bad key chars")
+    return key
+
+# Check API key at startup but don't exit
 try:
-    embedding_model = HuggingFaceEmbeddings(
-        model_name="thenlper/gte-small",
-        model_kwargs={"device": "cpu"},
-        encode_kwargs={"normalize_embeddings": True}
-    )
-    vector_store = FAISS.load_local(INDEX_PATH, embedding_model, allow_dangerous_deserialization=True)
-    print(f"   Vector store: {vector_store.index.ntotal:,} vectors")
-
-    _model = ChatGroq(api_key=API_KEY, model_name="llama-3.3-70b-versatile",
-                      temperature=0.1, max_tokens=4096, timeout=60)
-    print(f"   LLM ready\n")
+    API_KEY = validate_api_key(API_KEY)
 except Exception as e:
-    print(f"ERROR loading models: {e}"); sys.exit(1)
+    print(f"WARNING: LLM API key validation failed: {e}")
 
-# ── Cities ────────────────────────────────────────────────────────────────────
-def load_cities():
-    cities = set()
-    for q in ["Pakistan","city","places","travel","tourism"]:
-        try:
-            for doc in vector_store.similarity_search(q, k=200):
-                c = doc.metadata.get("Places_city","").strip()
-                if c and len(c) > 2: cities.add(c.lower())
-        except: pass
-    if cities:
-        lst = sorted(cities); print(f"Loaded {len(lst)} cities\n"); return lst
-    fb = ["karachi","lahore","islamabad","rawalpindi","faisalabad",
-          "multan","peshawar","quetta","hyderabad","abbottabad"]
-    print(f"Fallback {len(fb)} cities\n"); return fb
-
-PAKISTAN_CITIES = load_cities()
-CITY_RE = re.compile(r"\b(" + "|".join(re.escape(c) for c in PAKISTAN_CITIES) + r")\b", re.IGNORECASE)
+# Removed heavy top-level initialization
+# PAKISTAN_CITIES = load_cities()
+# CITY_RE = re.compile(r"\b(" + "|".join(re.escape(c) for c in PAKISTAN_CITIES) + r")\b", re.IGNORECASE)
 
 # ── Destination Alias Map ─────────────────────────────────────────────────────
 DESTINATION_ALIASES: Dict[str, str] = {
@@ -191,8 +202,9 @@ def detect_prompt_injection(q):
 
 # ── Query Parsing ─────────────────────────────────────────────────────────────
 def parse_travel_intent(query):
+    _, _, city_re = get_llm_resources()
     ql = query.lower()
-    cities = [m.title() for m in CITY_RE.findall(ql)]
+    cities = [m.title() for m in city_re.findall(ql)]
     dest = None
     m = re.search(r"from\s+\w+\s+to\s+(\w+(?:\s+\w+)?)", ql)
     if m:
@@ -308,6 +320,7 @@ def matches_timing(place_timing: List[str], required_timing: str) -> bool:
 # RETRIEVE & FILTER
 # ============================================================================
 def retrieve_and_filter_places(intent, k_per_query=100):
+    _, v_store, _ = get_llm_resources()
     MAX_DOCS  = 600
     dest      = intent.get("destination_city")
     bud_pref  = intent.get("budget_preference")
@@ -318,13 +331,13 @@ def retrieve_and_filter_places(intent, k_per_query=100):
         if len(all_docs) >= MAX_DOCS: break
         try:
             k = min(k_per_query, MAX_DOCS - len(all_docs))
-            for doc in vector_store.similarity_search(q, k=k):
+            for doc in v_store.similarity_search(q, k=k):
                 name = doc.metadata.get("Places_name","").strip()
                 nn   = normalize_place_name(name)
                 did  = f"{name}_{doc.metadata.get('Places_city','')}"
                 if nn in seen_norm or did in seen_ids: continue
                 all_docs.append(doc); seen_ids.add(did); seen_norm.add(nn)
-        except Exception as e: logger.warning(f"Search: {e}")
+        except Exception as e: safe_log("warning", f"Search: {e}")
     hotels, restaurants, attractions = [], [], []
     used_names, used_norm_set = set(), set()
     for doc in all_docs:
@@ -402,16 +415,32 @@ def format_context(intent, hotels, restaurants, attractions):
     ctx += slot_section("NIGHT LIST:", "night", attractions, 1)
     return ctx
 
-PROMPT_TEMPLATE = """You are a Pakistan Travel Itinerary AI.
-Rule: Zero Duplicates. Use lists in order. If list exhausted, use FREE TIME.
+PROMPT_TEMPLATE = """Generate a {duration}-day travel itinerary for {destination}.
+
+STRICT RULES:
+- Generate exactly {duration} days only.
+- Origin/Departure: {departure_location}
+- Travel Style: {travel_style}
+- Budget: {budget}
+- Interests: {interests}
+- Do NOT generate extra days.
+- Do NOT add notes, warnings, explanations, or disclaimers.
+- Do NOT mention missing information.
+- Return only the itinerary content in the specified format.
+- Keep activities realistic and properly formatted.
+- Zero Duplicates. Use lists in order. If list exhausted, use FREE TIME.
+
 Format:
 ### Day 1
 1. **9:00 AM** – 🏨 Check-in at [Hotel](link) - Type (MODERATE) ⏰ Tag ⏰
 ...
+
 DATA:
 {context}
+
 QUERY: {question}
-Generate {duration} days."""
+Generate exactly {duration} days.
+"""
 
 # ============================================================================
 # ANALYSIS & RETRY
@@ -422,14 +451,15 @@ def analyze_itinerary(content, intent, hotels, restaurants, attractions):
     return {"links":len(links), "score": 100}
 
 def invoke_llm_with_retry(prompt: str, max_attempts: int = 3):
+    llm, _, _ = get_llm_resources()
     last_error = None
     for attempt in range(max_attempts):
         try:
-            return _model.invoke(prompt)
+            return llm.invoke(prompt)
         except Exception as e:
             last_error = e
             time.sleep(2)
-    logger.error(f"LLM failed: {last_error}")
+    safe_log("error", f"LLM failed: {last_error}")
     return None
 
 # ============================================================================
@@ -442,35 +472,100 @@ def parse_itinerary_to_json(content):
     current_day = None
     seen_days = set()
     lines = content.split("\n")
+    
+    # Pre-compiled regex for better performance
+    TIME_RE = re.compile(r"\*\*(.*?)\*\*")
+    URL_RE = re.compile(r"(https?://[^\s\|]+)")
+    BRACKET_RE = re.compile(r"\[(.*?)\]")
+    
     for line in lines:
         line = line.strip()
+        if not line: continue
+        
         if line.startswith("### Day"):
             day_name = line.replace("### ", "").strip()
             if day_name in seen_days: continue
             seen_days.add(day_name)
             if current_day: days.append(current_day)
             current_day = {"day": day_name, "schedule": []}
-        elif re.match(r"^\d+\.", line) and current_day:
+            
+        elif current_day:
+            # Check if this line likely contains an itinerary item
+            if not (re.match(r"^[\d\.\-\*\s]*\d+\.", line) or "**" in line or "|" in line):
+                continue
+                
             try:
-                time_match = re.search(r"\*\*(.*?)\*\*", line)
-                time = time_match.group(1) if time_match else "N/A"
-                raw_activity = re.sub(r"^\d+\.\s*\*\*.*?\*\*\s*–\s*", "", line)
-                link_match = re.search(r"\[(.*?)\]\((.*?)\)", raw_activity)
-                place_name = link_match.group(1) if link_match else None
-                link = link_match.group(2) if link_match else None
-                type_match = re.search(r"Type\s*\(?\s*(?:💵|💳|💎)?\s*(LOW|MODERATE|HIGH)\s*\)?", raw_activity, re.IGNORECASE)
-                budget_type = type_match.group(1).lower() if type_match else None
-                clean_activity = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", raw_activity)
-                clean_activity = re.sub(r"-\s*Type.*", "", clean_activity)
-                clean_activity = re.sub(r"[^\w\s:,.-]", "", clean_activity).strip()
-                current_day["schedule"].append({"time": time, "activity": clean_activity, "place": place_name, "link": link, "type": budget_type, "raw": raw_activity})
-            except Exception: continue
+                # 1. Extract Time
+                time_match = TIME_RE.search(line)
+                time_str = time_match.group(1) if time_match else "N/A"
+                
+                # 2. Extract Link
+                url_match = URL_RE.search(line)
+                link = url_match.group(1).rstrip(")").rstrip("]").rstrip("|") if url_match else None
+                
+                # 3. Extract Budget/Type
+                budget_type = "moderate"
+                if any(k in line.upper() for k in ["LOW", "💵"]): budget_type = "low"
+                elif any(k in line.upper() for k in ["HIGH", "💎"]): budget_type = "high"
+                
+                # 4. Extract Place Name
+                place_name = None
+                bracket_match = BRACKET_RE.search(line)
+                if bracket_match:
+                    place_name = bracket_match.group(1)
+                
+                # Fallback if no brackets
+                if not place_name:
+                    parts = re.split(r"[–-]\s*", line)
+                    if len(parts) > 1:
+                        potential_place = parts[1]
+                        potential_place = re.sub(r"^[^\w]*Visit\s+", "", potential_place, flags=re.I)
+                        potential_place = re.sub(r"^[^\w]*Check-in at\s+", "", potential_place, flags=re.I)
+                        potential_place = re.sub(r"^[^\w]*", "", potential_place)
+                        potential_place = re.split(r"[\(\[\|]", potential_place)[0].strip()
+                        if potential_place:
+                            place_name = potential_place
+
+                # 5. Extract Activity Text
+                if not place_name: place_name = "Interesting Place"
+                
+                activity_text = "Visit " + place_name
+                if "Check-in" in line.lower() or "🏨" in line:
+                    activity_text = "Check-in at " + place_name
+                elif "breakfast" in line.lower() or "🍳" in line:
+                    activity_text = "Breakfast at " + place_name
+                elif "lunch" in line.lower() or "🍽️" in line:
+                    activity_text = "Lunch at " + place_name
+                elif "dinner" in line.lower() or "🌙" in line:
+                    activity_text = "Dinner at " + place_name
+
+                # Final fallback for link
+                if not link:
+                    link = f"https://www.google.com/maps/search/{place_name.replace(' ', '+')}"
+
+                # Reconstruct raw format
+                emoji = "💵" if budget_type == "low" else "💳" if budget_type == "moderate" else "💎"
+                reconstructed_raw = f"📍 {activity_text} [{place_name}]({link}) - Type ({emoji} {budget_type.upper()}) ⏰ {time_str} ⏰"
+
+                current_day["schedule"].append({
+                    "time": time_str,
+                    "activity": activity_text,
+                    "place": place_name,
+                    "link": link,
+                    "type": budget_type,
+                    "raw": reconstructed_raw
+                })
+            except Exception as e:
+                safe_log("error", f"Error parsing line: {line} | {e}")
+                continue
+                
     if current_day: days.append(current_day)
     return days
 
-def generate_itinerary_llm(destination, days, budget, interests):
+
+def generate_itinerary_llm(destination, days, budget, interests, departure_location="Not specified", travel_style="General"):
     request_id = f"LLM-{uuid.uuid4().hex[:6]}"
-    logger.info(f"[{request_id}] 🚀 Start generation: dest={destination}, days={days}, budget={budget}")
+    safe_log("info", f"[{request_id}] 🚀 Start generation: dest={destination}, days={days}, budget={budget}")
     try:
         user_query = f"Generate a {days}-day trip to {destination} with interests {', '.join(interests)} and budget {budget}."
         if not rate_limiter.allow_request(): raise Exception("Rate limit exceeded")
@@ -481,11 +576,46 @@ def generate_itinerary_llm(destination, days, budget, interests):
         hotels, restaurants, attractions = retrieve_and_filter_places(intent)
         if not hotels: raise ValueError("NO_HOTELS: No hotels found for this destination")
         context = format_context(intent, hotels, restaurants, attractions)
-        prompt = PROMPT_TEMPLATE.format(context=context, question=user_query, duration=days)
-        logger.info(f"[{request_id}] 🤖 Calling LLM...")
+        
+        # ── Safe Formatting ──────────────────────────────────────────────────
+        format_kwargs = {
+            "context": context,
+            "question": user_query,
+            "duration": days,
+            "destination": destination,
+            "budget": budget,
+            "interests": ", ".join(interests) if interests else "General",
+            "departure_location": departure_location,
+            "travel_style": travel_style
+        }
+        
+        try:
+            prompt = PROMPT_TEMPLATE.format(**format_kwargs)
+        except KeyError as e:
+            safe_log("error", f"[{request_id}] ❌ Missing prompt placeholder: {e}")
+            # Fallback: manually fill what we can or use empty string for missing
+            from collections import defaultdict
+            dd = defaultdict(lambda: "", **format_kwargs)
+            prompt = PROMPT_TEMPLATE.format_map(dd)
+
+        safe_log("info", f"[{request_id}] 🤖 Calling LLM...")
         response = invoke_llm_with_retry(prompt)
         if response is None: raise Exception("AI_GENERATION_FAILED: LLM returned no response")
-        structured_output = parse_itinerary_to_json(response.content)
+        
+        # Clean content (remove any preamble/postamble)
+        content = response.content
+        if "### Day 1" in content:
+            content = content[content.find("### Day 1"):]
+        
+        structured_output = parse_itinerary_to_json(content)
+        
+        # VALIDATION: Ensure exactly {days} days
+        if len(structured_output) > days:
+            safe_log("warning", f"[{request_id}] ⚠️ Truncating itinerary from {len(structured_output)} to {days} days")
+            structured_output = structured_output[:days]
+        elif len(structured_output) < days:
+            safe_log("warning", f"[{request_id}] ⚠️ LLM generated fewer days ({len(structured_output)}) than requested ({days})")
+            
         return structured_output
     except ValueError as e: raise e
     except Exception as e:

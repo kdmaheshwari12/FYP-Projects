@@ -349,7 +349,7 @@ async def create_itinerary(
             },
             "created_at": datetime.utcnow(),
             "updated_at": datetime.utcnow(),
-            "is_published": False,
+            "is_published": True,
         }
         
         result = await broker_itineraries_collection.insert_one(itinerary)

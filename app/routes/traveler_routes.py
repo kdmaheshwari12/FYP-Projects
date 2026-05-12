@@ -9,6 +9,7 @@ from app.db.mongodb import (
     messages_collection
 )
 from app.core.security import decode_access_token
+from app.middleware.auth_middleware import get_current_active_user
 from bson import ObjectId
 import datetime
 import random
@@ -107,7 +108,7 @@ async def log_message(
 # 🔵 CHATBOT ROUTE (UPDATED WITH VALIDATION)
 # -------------------------------------------
 @router.post("/chat")
-async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
+async def travel_chatbot(message: dict, current_user: dict = Depends(get_current_active_user)):
     """
     Chat endpoint with message validation and sanitization.
     
@@ -116,11 +117,7 @@ async def travel_chatbot(message: dict, token: str = Depends(oauth2_scheme)):
       "message": "I want to visit Hunza Valley"
     }
     """
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    email = payload["sub"]
+    email = current_user["email"]
     
     # ========== MESSAGE VALIDATION & SANITIZATION ==========
     user_msg_raw = message.get("message")
@@ -439,14 +436,10 @@ def _serialize_doc(doc: dict) -> dict:
 
 # 1️⃣ Traveler Dashboard
 @router.get("/dashboard")
-async def get_dashboard(token: str = Depends(oauth2_scheme)):
+async def get_dashboard(current_user: dict = Depends(get_current_active_user)):
     """Get traveler dashboard data (My Trips + Suggested Itineraries)"""
     global SUGGESTED_CACHE
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    email = payload["sub"]
+    email = current_user["email"]
 
     try:
         # Fetch My Trips
@@ -484,13 +477,9 @@ async def get_dashboard(token: str = Depends(oauth2_scheme)):
 
 # 2️⃣ Save Preferences
 @router.post("/preferences")
-async def save_preferences(preferences: dict, token: str = Depends(oauth2_scheme)):
+async def save_preferences(preferences: dict, current_user: dict = Depends(get_current_active_user)):
     """Save user preferences temporarily before AI generation"""
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    email = payload["sub"]
+    email = current_user["email"]
 
     # Remove previous preferences for this user
     await preferences_collection.delete_many({"user_email": email})
@@ -511,7 +500,7 @@ async def save_preferences(preferences: dict, token: str = Depends(oauth2_scheme
 @router.post("/generate-itinerary")
 async def generate_itinerary(
     preferences: ItineraryRequest,          # ← strict Pydantic schema
-    token: str = Depends(oauth2_scheme)
+    current_user: dict = Depends(get_current_active_user)
 ):
     """
     Generate a personalized AI itinerary.
@@ -528,12 +517,7 @@ async def generate_itinerary(
     message BEFORE the LLM is called.
     """
 
-    # ── Auth ──────────────────────────────────────────────────────────────────
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-
-    email = payload["sub"]
+    email = current_user["email"]
     request_id = f"GEN-{uuid.uuid4().hex[:8]}"
     logger.info(
         f"[{request_id}] 🤖 generate-itinerary | user={email} "
@@ -587,6 +571,8 @@ async def generate_itinerary(
             days=duration,
             budget=budget_category,
             interests=interests,
+            departure_location=preferences.departure_location or "Not specified",
+            travel_style=travel_style
         )
     except ValueError as e:
         # Catch specific ValueErrors (like NO_HOTELS)
@@ -664,36 +650,50 @@ async def generate_itinerary(
 
 # 4️⃣ View Specific Itinerary
 @router.get("/itinerary/{itinerary_id}")
-async def get_itinerary(itinerary_id: str, token: str = Depends(oauth2_scheme)):
+async def get_itinerary(itinerary_id: str, current_user: dict = Depends(get_current_active_user)):
     """Fetch a specific itinerary by its ID"""
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    email = current_user["email"]
 
-    itinerary = await itineraries_collection.find_one({"_id": ObjectId(itinerary_id)})
-    if not itinerary:
-        raise HTTPException(status_code=404, detail="Itinerary not found")
+    try:
+        try:
+            obj_id = ObjectId(itinerary_id)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid itinerary ID format")
 
-    itinerary["_id"] = str(itinerary["_id"])
-    return itinerary
+        itinerary = await itineraries_collection.find_one({"_id": obj_id})
+        if not itinerary:
+            raise HTTPException(status_code=404, detail="Itinerary not found")
+
+        itinerary["_id"] = str(itinerary["_id"])
+        return itinerary
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        logger.error(f"Error fetching itinerary {itinerary_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 # 5️⃣ Update Itinerary
 @router.put("/itinerary/{itinerary_id}/update")
-async def update_itinerary(itinerary_id: str, updates: dict, token: str = Depends(oauth2_scheme)):
+async def update_itinerary(
+    itinerary_id: str,
+    updates: dict,
+    current_user: dict = Depends(get_current_active_user)
+):
     """Update an itinerary (e.g., after AI modifies it)."""
-    payload = decode_access_token(token)
-    if not payload:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    try:
+        obj_id = ObjectId(itinerary_id)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid itinerary ID format")
 
     result = await itineraries_collection.update_one(
-        {"_id": ObjectId(itinerary_id)}, {"$set": updates}
+        {"_id": obj_id}, {"$set": updates}
     )
 
     if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail="Itinerary not updated")
+        raise HTTPException(status_code=404, detail="Itinerary not found or nothing to update")
 
-    return {"message": "Itinerary updated successfully"}
+    return {"success": True, "message": "Itinerary updated successfully"}
 
 
 # 6️⃣ Suggested Itineraries - suggest top5 itineraries on dashboard

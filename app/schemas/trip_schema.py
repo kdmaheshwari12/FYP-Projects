@@ -1,6 +1,6 @@
 # app/schemas/trip_schema.py
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
-from typing import List, Optional
+from typing import List, Optional, Union
 from datetime import date
 from enum import Enum
 from app.schemas.itinerary_schema import TravelStyle
@@ -16,11 +16,28 @@ class TripCreate(BaseModel):
     departure_location: str = Field(..., min_length=1, description="Departure city")
     start_date: date = Field(..., description="Trip start date")
     end_date: date = Field(..., description="Trip end date")
-    budget: float = Field(..., gt=0, description="Trip budget in PKR")
+    budget: Union[float, str] = Field(..., description="Trip budget in PKR or category (low, moderate, high)")
     travel_style: TravelStyle = Field(..., description="Travel style (e.g. adventure, luxury)")
     itinerary_id: Optional[str] = Field(None, description="Optional ID of an existing itinerary to reuse")
     trip_type: Optional[str] = Field("ai", description="Type of trip (ai, broker, ai_self, ai_broker)")
     broker_id: Optional[str] = Field(None, description="Optional broker ID if applicable")
+
+    @model_validator(mode="before")
+    @classmethod
+    def handle_budget_mapping(cls, data: any) -> any:
+        if not isinstance(data, dict):
+            return data
+        
+        budget_val = data.get("budget")
+        if isinstance(budget_val, str):
+            mapping = {"low": 20000, "moderate": 50000, "high": 150000}
+            try:
+                # Try converting to float first in case it's a numeric string
+                data["budget"] = float(budget_val)
+            except (ValueError, TypeError):
+                # If not a numeric string, check mapping
+                data["budget"] = mapping.get(budget_val.lower(), 50000)
+        return data
 
     @field_validator("trip_type")
     @classmethod

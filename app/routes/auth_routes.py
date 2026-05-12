@@ -66,44 +66,13 @@ _bearer = HTTPBearer()
 from jose import JWTError, ExpiredSignatureError
 
 async def get_current_user_obj(
-    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+    current_user: dict = Depends(get_current_user),
 ) -> dict:
     """
-    FastAPI dependency that verifies the backend JWT and returns the
-    MongoDB user document with ``_id`` converted to a string.
+    Alias for compatibility. Returns the MongoDB user document 
+    with _id as a string (already handled by get_current_user).
     """
-    token = credentials.credentials
-
-    try:
-        payload = decode_access_token(token)
-        email: str = payload.get("sub")
-        if not email:
-            raise JWTError("Missing 'sub' claim")
-
-        user = await users_col.find_one({"email": email})
-        if user is None:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="User not found",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-            
-        # Convert ObjectId → string
-        user["_id"] = str(user["_id"])
-        return user
-
-    except ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token expired",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    except JWTError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    return current_user
 
 
 # --------------------------------------------------------------------------

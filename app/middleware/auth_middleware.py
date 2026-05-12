@@ -59,6 +59,13 @@ async def get_current_user(
 
         # Attach the role from the JWT payload
         user["_jwt_role"] = payload.get("role", "user")
+        if "role" not in user:
+            user["role"] = user["_jwt_role"]
+        
+        # Internal compatibility: ensure _id exists (get_user_by_email returns 'id')
+        if "_id" not in user and "id" in user:
+            user["_id"] = user["id"]
+            
         return user
 
     except ExpiredSignatureError:

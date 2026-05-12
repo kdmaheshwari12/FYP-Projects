@@ -412,40 +412,44 @@ def format_context(intent, hotels, restaurants, attractions):
                 lines += f"  {i}. {p['name']} | {p['type']} | {p['link']} | ({e} {p['budget_category'].upper()}) | ⏰ {p['timing_display']} ⏰\n"
         else: lines += "  NONE — use FREE TIME\n"
         return lines + "\n"
-    ctx += slot_section("BREAKFAST LIST:", "breakfast", restaurants, 1)
-    ctx += slot_section("LUNCH LIST:", "lunch", restaurants, 1)
-    ctx += slot_section("DINNER LIST:", "dinner", restaurants, 1)
-    ctx += slot_section("MORNING LIST:", "morning", attractions, 4)
-    ctx += slot_section("AFTERNOON LIST:", "afternoon", attractions, 4)
-    ctx += slot_section("EVENING LIST:", "evening", attractions, 1)
-    ctx += slot_section("NIGHT LIST:", "night", attractions, 1)
+    ctx += slot_section("BREAKFAST LIST:", "breakfast", restaurants, 2)
+    ctx += slot_section("LUNCH LIST:", "lunch", restaurants, 2)
+    ctx += slot_section("DINNER LIST:", "dinner", restaurants, 2)
+    ctx += slot_section("MORNING LIST:", "morning", attractions, 6)
+    ctx += slot_section("AFTERNOON LIST:", "afternoon", attractions, 6)
+    ctx += slot_section("EVENING LIST:", "evening", attractions, 3)
+    ctx += slot_section("NIGHT LIST:", "night", attractions, 3)
     return ctx
 
-PROMPT_TEMPLATE = """Generate a {duration}-day travel itinerary for {destination}.
+PROMPT_TEMPLATE = """Generate a dense {duration}-day travel itinerary for {destination}.
 
 STRICT RULES:
 - Generate exactly {duration} days only.
-- Origin/Departure: {departure_location}
-- Travel Style: {travel_style}
-- Budget: {budget}
-- Interests: {interests}
+- Each day MUST have 7-10 activities, spaced realistically from 8:00 AM to 10:00 PM.
+- Follow this pattern:
+  * 8:00 AM: Breakfast / Hotel Check-in
+  * 9:00 AM - 1:00 PM: 2-3 Tourist attractions
+  * 1:00 PM - 2:30 PM: Lunch at a recommended restaurant
+  * 3:00 PM - 6:30 PM: 2-3 more attractions/shopping/parks
+  * 7:00 PM - 9:00 PM: Dinner + evening activity
+  * 10:00 PM: Rest / (Departure on last day)
+- MANDATORY DEPARTURE: Add "10:00 PM – 🛫 Departure from {destination} [Airport / Bus Terminal](https://www.google.com/maps/search/{destination}+Airport) - Type (MODERATE) ⏰ 10:00 PM ⏰" ONLY at the end of Day {duration}.
+- Zero Duplicates. Use the provided lists in order. 
 - Do NOT generate extra days.
-- Do NOT add notes, warnings, explanations, or disclaimers.
-- Do NOT mention missing information.
-- Return only the itinerary content in the specified format.
-- Keep activities realistic and properly formatted.
-- Zero Duplicates. Use lists in order. If list exhausted, use FREE TIME.
+- Do NOT add notes, warnings, or preamble.
+- No null links. If no link is in data, use google maps search link.
 
-Format:
+Format Example:
 ### Day 1
-1. **9:00 AM** – 🏨 Check-in at [Hotel](link) - Type (MODERATE) ⏰ Tag ⏰
+1. **8:00 AM** – 🏨 Check-in at [Hotel Name](link) - Type (MODERATE) ⏰ 8:00 AM ⏰
+2. **9:30 AM** – 🏛️ Visit [Attraction Name](link) - Type (LOW) ⏰ 9:30 AM ⏰
 ...
 
 DATA:
 {context}
 
 QUERY: {question}
-Generate exactly {duration} days.
+Generate exactly {duration} days with high activity density.
 """
 
 # ============================================================================
@@ -536,7 +540,11 @@ def parse_itinerary_to_json(content):
                 if not place_name: place_name = "Interesting Place"
                 
                 activity_text = "Visit " + place_name
-                if "Check-in" in line.lower() or "🏨" in line:
+                if "Departure" in line or "🛫" in line:
+                    activity_text = "Departure"
+                    if "Airport" in line: activity_text = "Departure from Airport"
+                    elif "Terminal" in line: activity_text = "Departure from Terminal"
+                elif "Check-in" in line.lower() or "🏨" in line:
                     activity_text = "Check-in at " + place_name
                 elif "breakfast" in line.lower() or "🍳" in line:
                     activity_text = "Breakfast at " + place_name
@@ -551,14 +559,16 @@ def parse_itinerary_to_json(content):
 
                 # Reconstruct raw format
                 emoji = "💵" if budget_type == "low" else "💳" if budget_type == "moderate" else "💎"
+                if "Departure" in activity_text: emoji = "🛫"
+                
                 reconstructed_raw = f"📍 {activity_text} [{place_name}]({link}) - Type ({emoji} {budget_type.upper()}) ⏰ {time_str} ⏰"
 
                 current_day["schedule"].append({
-                    "time": time_str,
+                    "time": time_str or "10:00 PM",
                     "activity": activity_text,
                     "place": place_name,
                     "link": link,
-                    "type": budget_type,
+                    "type": budget_type or "moderate",
                     "raw": reconstructed_raw
                 })
             except Exception as e:

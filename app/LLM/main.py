@@ -423,38 +423,43 @@ def format_context(intent, hotels, restaurants, attractions):
 
 PROMPT_TEMPLATE = """Generate an ultra-detailed {duration}-day travel itinerary for {destination}.
 
-STRICT RULES:
-- EACH DAY MUST HAVE EXACTLY 14 schedule entries. No more, no less.
-- Follow this DAILY STRUCTURE:
-  1. 8:00 AM – 🏨 Hotel Check-in / Wake-up [Hotel](link)
-  2. 8:45 AM – 🍳 Breakfast at [Restaurant](link)
-  3. 9:30 AM – 🏛️ Morning attraction
-  4. 11:00 AM – 📍 Major Tourist attraction
-  5. 12:00 PM – 📜 Historical/Cultural place
-  6. 1:30 PM – 🍽️ Lunch at [Restaurant](link)
-  7. 2:30 PM – 🛍️ Shopping/Market visit
-  8. 3:30 PM – 🌳 Park/Scenic place
-  9. 4:30 PM – 🖼️ Famous attraction
-  10. 5:30 PM – 🎨 Evening activity
-  11. 7:00 PM – 🌙 Dinner at [Restaurant](link)
-  12. 8:30 PM – ✨ Night attraction
-  13. 9:30 PM – 🏨 Rest at Hotel [Hotel](link) - Type (HOTEL) ⏰ 9:30 PM ⏰
-  14. 10:30 PM – 🛌 Final Activity (or Departure on last day)
+STRICT REQUIREMENTS (VIOLATION IS FAILURE):
+1. EACH DAY MUST HAVE EXACTLY 14 SCHEDULE ENTRIES. NOT 13, NOT 15. EXACTLY 14.
+2. FOLLOW THIS DAILY STRUCTURE FOR ALL DAYS:
+   1. 8:00 AM – 🏨 Hotel Check-in / Morning Start [Hotel](link)
+   2. 8:45 AM – 🍳 Breakfast at [Restaurant](link)
+   3. 9:30 AM – 🏛️ Morning Tourist Attraction
+   4. 10:30 AM – 📜 Historical Place
+   5. 11:30 AM – 🎭 Cultural Place
+   6. 12:30 PM – 🌳 Scenic Spot
+   7. 1:30 PM – 🍽️ Lunch at [Restaurant](link)
+   8. 2:30 PM – 🛍️ Shopping Place
+   9. 3:30 PM – 📍 Famous Attraction
+   10. 4:30 PM – 🏖️ Park / Beach / Adventure Spot
+   11. 5:30 PM – 🎨 Evening Activity
+   12. 7:00 PM – 🌙 Dinner at [Restaurant](link)
+   13. 8:15 PM – ✨ Night Attraction
+   14. 9:15 PM – 🏨 Rest at Hotel [Hotel](https://maps.google.com) - Type (HOTEL) ⏰ 9:15 PM ⏰
 
-- DEPARTURE RULE: On the LAST DAY (Day {duration}), entry #14 MUST be: 
-  "6:00 PM – 🛫 Departure from {destination} [Airport / Bus Terminal](https://www.google.com/maps/search/{destination}+Airport) - Type (DEPARTURE) ⏰ 6:00 PM ⏰"
-  (Adjust previous times on last day to ensure this fits).
+3. LAST DAY DEPARTURE RULE:
+   - On the VERY LAST DAY (Day {duration}), entry #14 MUST BE:
+     "6:00 PM – 🛫 Departure from {destination} [{destination}](https://maps.google.com) - Type (DEPARTURE) ⏰ 6:00 PM ⏰"
+   - You MUST adjust the times of previous entries (1-13) on the last day so that they are earlier and entry #14 happens exactly at 6:00 PM.
 
-- Zero Duplicates. Use the provided lists in order. 
-- Do NOT generate extra days.
-- Do NOT add preamble or notes.
-- No null links. If no link exists in data, use google maps search link.
+4. EXACT WORDING REQUIRED:
+   - Use "Rest at Hotel" exactly. No variations.
+   - Use "Departure from {destination}" exactly. No variations.
+
+5. DATA RULES:
+   - Zero Duplicates.
+   - NO NULL VALUES. Every entry must have a valid place name and a link (use google maps search if missing).
+   - No preamble, no notes, no extra text.
 
 DATA:
 {context}
 
 QUERY: {question}
-Generate exactly {duration} days, each with EXACTLY 14 entries.
+GENERATE EXACTLY 14 ENTRIES PER DAY.
 """
 
 # ============================================================================
@@ -544,14 +549,23 @@ def parse_itinerary_to_json(content):
                 # 5. Extract Activity Text
                 if not place_name: place_name = "Interesting Place"
                 
+                # Default activity text
                 activity_text = "Visit " + place_name
+
+                # RIGID DETECTION FOR REST AND DEPARTURE
                 if "Departure" in line or "🛫" in line:
-                    activity_text = "Departure"
+                    # Force exact wording: Departure from {destination}
+                    # We try to extract the city if possible, else use Interesting Place
+                    activity_text = f"Departure from {place_name}"
+                    if "Departure from" in line:
+                        # Extract whatever follows "Departure from" up to the next marker
+                        m = re.search(r"Departure from (.*?)[\[\-\(⏰]", line)
+                        if m: activity_text = f"Departure from {m.group(1).strip()}"
+                    
                     budget_type = "departure"
-                    if "Airport" in line: activity_text = "Departure from Airport"
-                    elif "Terminal" in line: activity_text = "Departure from Terminal"
                 elif "Rest at Hotel" in line or "🏨" in line:
                     activity_text = "Rest at Hotel"
+                    place_name = "Hotel"
                     budget_type = "hotel"
                 elif "Check-in" in line.lower():
                     activity_text = "Check-in at " + place_name
@@ -568,11 +582,14 @@ def parse_itinerary_to_json(content):
                     link = f"https://www.google.com/maps/search/{place_name.replace(' ', '+')}"
 
                 # Reconstruct raw format
-                emoji = "💵" if budget_type == "low" else "💳" if budget_type == "moderate" else "💎"
+                emoji = "📍"
                 if budget_type == "departure": emoji = "🛫"
                 elif budget_type == "hotel": emoji = "🏨"
+                elif budget_type == "low": emoji = "💵"
+                elif budget_type == "moderate": emoji = "💳"
+                elif budget_type == "high": emoji = "💎"
                 
-                reconstructed_raw = f"📍 {activity_text} [{place_name}]({link}) - Type ({emoji} {budget_type.upper()}) ⏰ {time_str} ⏰"
+                reconstructed_raw = f"{emoji} {activity_text} [{place_name}]({link}) - Type ({emoji} {budget_type.upper()}) ⏰ {time_str} ⏰"
 
                 current_day["schedule"].append({
                     "time": time_str or "10:00 PM",

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import logging
 import uuid
 from app.core.config import settings
-from app.db.mongodb import trips_collection, itineraries_collection, broker_itineraries_collection
+from app.db.mongodb import trips_collection, users_collection, itineraries_collection, broker_itineraries_collection
 from app.routes.auth_routes import get_current_user_obj
 from app.schemas.trip_schema import TripCreate
 from app.core.validation import (
@@ -323,54 +323,106 @@ async def get_trip_chat_peer(
     """
     Returns the OTHER user's CometChat UID for this trip
     """
-    print("Trip ID:", trip_id)
+    request_id = f"PEER-{uuid.uuid4().hex[:6]}"
+    logger.info(f"[{request_id}] 🚀 START GET_CHAT_PEER | trip_id: {trip_id}")
+
     try:
-        trip_obj_id = ObjectId(trip_id)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid trip_id")
-
-    trip = await trips_collection.find_one({"_id": trip_obj_id})
-
-    if not trip:
-        raise HTTPException(status_code=404, detail="Trip not found")
-
-    current_user_id = ObjectId(current_user["_id"])
-
-    # 🧠 Determine peer
-    if trip["user_id"] == current_user_id:
-        # Traveler → Broker
-        if not trip.get("broker_id"):
-            raise HTTPException(
+        # 1️⃣ Validate trip_id
+        try:
+            logger.info(f"[{request_id}] 🔍 Validating trip_id: {trip_id}")
+            trip_obj_id = ObjectId(trip_id)
+        except Exception as e:
+            logger.warning(f"[{request_id}] ❌ Invalid trip_id format: {trip_id}. Error: {str(e)}")
+            return JSONResponse(
                 status_code=400,
-                detail="Trip has no broker assigned yet"
+                content={"success": False, "message": "Invalid trip_id format"}
             )
 
-        peer_id = trip["broker_id"]
-        peer_role = "broker"
+        # 2️⃣ Fetch trip
+        logger.info(f"[{request_id}] 🔍 Fetching trip from MongoDB...")
+        trip = await trips_collection.find_one({"_id": trip_obj_id})
+        if not trip:
+            logger.warning(f"[{request_id}] ❌ Trip not found in DB: {trip_id}")
+            return JSONResponse(
+                status_code=404,
+                content={"success": False, "message": "Trip not found"}
+            )
 
-    elif trip.get("broker_id") == current_user_id:
-        # Broker → Traveler
-        peer_id = trip["user_id"]
-        peer_role = "traveler"
+        current_user_id_raw = current_user["_id"]
+        trip_user_id_raw = trip["user_id"]
+        trip_broker_id_raw = trip.get("broker_id")
 
-    else:
-        raise HTTPException(
-            status_code=403,
-            detail="You are not part of this trip"
+        logger.info(f"[{request_id}] 🎫 Trip Details: user_id={trip_user_id_raw} ({type(trip_user_id_raw)}), broker_id={trip_broker_id_raw} ({type(trip_broker_id_raw)})")
+        logger.info(f"[{request_id}] 👤 Current User: {current_user_id_raw} ({type(current_user_id_raw)})")
+
+        # Normalize to strings for comparison
+        current_user_id = str(current_user_id_raw)
+        trip_user_id = str(trip_user_id_raw)
+        trip_broker_id = str(trip_broker_id_raw) if trip_broker_id_raw else None
+
+        # 3️⃣ Determine peer
+        if trip_user_id == current_user_id:
+            logger.info(f"[{request_id}] 👤 Caller is Traveler")
+            if not trip_broker_id:
+                logger.warning(f"[{request_id}] ❌ No broker assigned to trip {trip_id}")
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": "This trip does not have an assigned broker yet."}
+                )
+            peer_id = trip_broker_id
+            peer_role = "broker"
+        elif trip_broker_id == current_user_id:
+            logger.info(f"[{request_id}] 👤 Caller is Broker")
+            peer_id = trip_user_id
+            peer_role = "traveler"
+        else:
+            logger.warning(f"[{request_id}] ❌ User {current_user_id} is not part of trip {trip_id} (user_id={trip_user_id}, broker_id={trip_broker_id})")
+            return JSONResponse(
+                status_code=403,
+                content={"success": False, "message": "You are not authorized to access chat for this trip"}
+            )
+
+        # 4️⃣ Fetch peer details
+        logger.info(f"[{request_id}] 🔍 Fetching peer user details from MongoDB (ID: {peer_id})...")
+        try:
+            peer_user = await users_collection.find_one(
+                {"_id": ObjectId(peer_id)},
+                {"full_name": 1, "name": 1, "org_name": 1}
+            )
+        except Exception as db_err:
+            logger.error(f"[{request_id}] ❌ DB Error fetching peer: {str(db_err)}")
+            raise db_err
+
+        if peer_user:
+            peer_name = (
+                peer_user.get("full_name") 
+                or peer_user.get("org_name") 
+                or peer_user.get("name") 
+                or "User"
+            )
+            logger.info(f"[{request_id}] ✅ Found peer: {peer_name}")
+        else:
+            peer_name = "User"
+            logger.warning(f"[{request_id}] ⚠️ Peer user {peer_id} not found in database")
+
+        logger.info(f"[{request_id}] ✨ SUCCESS: peerUid={peer_id}, peerRole={peer_role}")
+        return {
+            "success": True,
+            "peerUid": str(peer_id),
+            "peerRole": peer_role,
+            "peerName": peer_name
+        }
+
+    except Exception as e:
+        logger.error(f"[{request_id}] 💥 FATAL EXCEPTION in get_trip_chat_peer: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "success": False, 
+                "message": "Internal server error fetching chat participant",
+                "debug_info": f"{type(e).__name__}: {str(e)}"
+            }
         )
-
-    # 👤 Fetch peer name
-    peer_user = await users_collection.find_one(
-        {"_id": peer_id},
-        {"full_name": 1}
-    )
-    peer_name = peer_user.get("full_name", "User") if peer_user else "User"
-
-    return {
-        "peerUid": str(peer_id),
-        "peerRole": peer_role,
-        "peerName": peer_name
-    }
 
 @router.patch("/{trip_id}/activate")
 async def activate_trip(
